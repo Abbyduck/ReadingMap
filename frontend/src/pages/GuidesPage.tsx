@@ -1,0 +1,21 @@
+import { useState } from "react";
+import { ArrowUpRight, ChevronLeft } from "lucide-react";
+import { ProductHeader } from "@/components/layout/ProductHeader";
+import { BookTile } from "@/components/books/BookTile";
+import { WorkDrawer } from "@/components/books/WorkDrawer";
+import { ageLabel, tones, toBook, useCatalog } from "@/lib/catalog";
+import type { PrototypeBook } from "./readingMapPrototype.mock";
+
+export function GuidesPage() {
+  const { creators, lists, loading, error } = useCatalog();
+  const [selectedBook, setSelectedBook] = useState<PrototypeBook | null>(null);
+  const creatorId = Number(window.location.pathname.split("/")[2]) || null;
+  const creator = creators.find(item => item.id === creatorId);
+  const visibleLists = lists.filter(list => !creatorId || list.creator_id === creatorId);
+  return <main className="product-root min-h-screen bg-[#f7f8f3] text-[#18352e]"><ProductHeader current="guides" /><section className="mx-auto w-full max-w-6xl px-5 py-12 sm:px-8 lg:py-20"><a href={creatorId ? "/guides" : "/"} className="inline-flex items-center gap-2 text-sm font-bold text-[#58716a]"><ChevronLeft size={16} />{creatorId ? "全部阅读达人" : "回到阅读房间"}</a><p className="mt-10 text-[11px] font-black tracking-[.16em] text-[#ad7124]">READING GUIDES</p><h1 className="mt-4 font-serif text-5xl font-semibold tracking-[-.045em] sm:text-6xl">{creator ? creator.name : <>从别人的路径里，<br />找到自己的方法。</>}</h1><p className="mt-5 max-w-2xl text-base leading-8 text-[#657972]">{creator ? creator.background || creator.signature_focus || "公开推荐书单" : "浏览达人简介与已审核的公开书单。年龄和推荐说明来自书单，不代表对孩子的自动评估。"}</p>
+    {loading && <p className="catalog-notice" role="status">正在加载达人与书单…</p>}{error && <p className="catalog-notice" role="alert">{error}</p>}{!loading && creatorId && !creator && <p className="catalog-notice">没有找到这位达人。</p>}
+    {!creatorId && <div className="mt-12 grid gap-5 sm:grid-cols-2 lg:grid-cols-4">{creators.map((guide, index) => <a href={`/guides/${guide.id}`} key={guide.id} className="group rounded-[30px] border border-[#dce4de] bg-white/80 p-5 text-inherit no-underline shadow-[0_18px_45px_rgba(31,64,55,.07)] transition duration-200 hover:-translate-y-2 hover:shadow-[0_28px_60px_rgba(31,64,55,.13)]"><div className="grid aspect-[4/5] place-items-center overflow-hidden rounded-[22px] text-white" style={{ backgroundColor: tones[index % tones.length] }}>{guide.avatar_url ? <img src={guide.avatar_url} alt="" className="h-full w-full object-cover" /> : <span className="font-serif text-7xl font-semibold opacity-90">{guide.name.slice(0, 1)}</span>}</div><div className="mt-5 flex items-start justify-between gap-3"><div><h2 className="font-serif text-2xl font-semibold">{guide.name}</h2><p className="mt-1 text-xs font-bold text-[#8b9792]">{guide.tagline || "阅读书单创作者"}</p></div><span className="grid size-9 place-items-center rounded-full bg-[#edf2ee] transition group-hover:bg-[#286353] group-hover:text-white"><ArrowUpRight size={16} /></span></div><p className="mt-4 text-sm leading-6 text-[#697b75]">{guide.signature_focus || "暂无领域介绍"}</p><small className="mt-5 block text-[10px] font-black tracking-[.12em] text-[#a26d29]">{lists.filter(list => list.creator_id === guide.id).length} 条公开书单</small></a>)}</div>}
+    {!loading && !creators.length && <p className="catalog-notice">还没有正式收录的达人。</p>}
+    <div className="mt-16 space-y-12">{visibleLists.map(list => <section key={list.id} id={`list-${list.id}`} className="border-t border-[#dce4de] pt-8"><a href={`/map?list=${list.id}`} className="float-right text-sm text-[#326957]">在地图查看 ↗</a><p className="text-xs text-[#9a6a2b]">{list.creator_name} · {ageLabel(list.age_min_months, list.age_max_months)}</p><h2 className="mt-2 font-serif text-3xl">{list.title}</h2><p className="mt-3 text-sm leading-7 text-[#657972]">{list.description || "暂无书单说明"}</p>{list.items?.length ? <div className="mt-8 grid grid-cols-2 gap-x-6 gap-y-10 sm:grid-cols-3 lg:grid-cols-5">{list.items.map(item => { const book = toBook(item.entity, lists, item, list); return <BookTile key={item.id} book={book} recommendationCount={book.recommendationCount ?? 0} onOpen={setSelectedBook} />; })}</div> : <p className="catalog-notice">这份书单尚无审核完成的推荐条目。</p>}</section>)}</div>
+  </section><WorkDrawer book={selectedBook} onClose={() => setSelectedBook(null)} /></main>;
+}

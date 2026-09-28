@@ -1,0 +1,6 @@
+Django==5.2.17
+djangorestframework==3.16.1
+mysqlclient==2.3.0
+jsonschema==4.25.1
+python-dotenv==1.1.1
+selenium==4.49.0

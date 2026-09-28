@@ -1,0 +1,32 @@
+from django.urls import path
+from . import views
+
+urlpatterns = [
+    path("batches", views.BatchList.as_view()),
+    path("batches/import", views.BatchImport.as_view()),
+    path("batches/<int:batch_id>/source", views.BatchSource.as_view()),
+    path("items", views.ItemList.as_view()),
+    path("items/bulk-match", views.BulkMatch.as_view()),
+    path("items/<int:item_id>", views.ItemDetail.as_view()),
+    path("browser-session/status", views.BrowserSessionStatus.as_view()),
+    path("items/<int:item_id>/amazon-search", views.ItemAmazonSearch.as_view()),
+    path("items/<int:item_id>/amazon-capture", views.ItemAmazonCapture.as_view()),
+    path("items/<int:item_id>/jd-search", views.ItemJdSearch.as_view()),
+    path("items/<int:item_id>/jd-capture", views.ItemJdCapture.as_view()),
+    path("items/<int:item_id>/official-search", views.ItemOfficialSearch.as_view()),
+    path("items/<int:item_id>/official-capture", views.ItemOfficialCapture.as_view()),
+    path("items/<int:item_id>/structure-research", views.ItemStructureResearch.as_view()),
+    path("items/<int:item_id>/parents", views.ItemParentStructure.as_view()),
+    path("items/<int:item_id>/parent-research", views.ItemParentResearch.as_view()),
+    path("items/<int:item_id>/decision", views.ItemDecision.as_view()),
+    path("subjects", views.SubjectCreate.as_view()),
+    path("subjects/<int:subject_id>", views.SubjectUpdate.as_view()),
+    path("items/<int:item_id>/subjects/<int:subject_id>/draft", views.SubjectDraftUpdate.as_view()),
+    path("subjects/<int:subject_id>/product-images", views.SubjectProductImages.as_view()),
+    path("subjects/<int:subject_id>/candidates", views.CandidateRefresh.as_view()),
+    path("subjects/<int:subject_id>/classification-summary", views.SubjectClassificationSummary.as_view()),
+    path("relations", views.RelationCreate.as_view()),
+    path("relations/<int:relation_id>", views.RelationDetail.as_view()),
+    path("conflicts", views.ConflictList.as_view()),
+    path("conflicts/<int:conflict_id>/resolve", views.ConflictResolve.as_view()),
+]
