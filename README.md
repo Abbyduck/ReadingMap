@@ -8,8 +8,7 @@
 frontend/     前端源码、静态资源、构建脚本
 backend/      Django 应用、迁移、测试与维护脚本
 .codex/       Codex 项目级 Skills
-skills/       旧 Skill 目录（迁移完成后移除）
-docs/         来源资料、达人笔记、导入格式等参考材料
+docs/         来源资料、达人笔记、数据统计等参考材料
 scripts/      数据工具与提交前检查
 data/         导入模板
 source_data/  书单来源数据与 JSON Schema
