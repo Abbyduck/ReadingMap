@@ -7,14 +7,28 @@
 ```text
 frontend/     前端源码、静态资源、构建脚本
 backend/      Django 应用、迁移、测试与维护脚本
-docs/         领域设计、审核行为约定与开发文档
+.codex/       Codex 项目级 Skills
+skills/       旧 Skill 目录（迁移完成后移除）
+docs/         来源资料、达人笔记、导入格式等参考材料
 scripts/      数据工具与提交前检查
-skills/       Research / 书单整理协作规则
 data/         导入模板
-source_data/  构建所需的一份书单样例与 JSON Schema
+source_data/  书单来源数据与 JSON Schema
 ```
 
-本地的环境配置、数据库备份、浏览器配置、个人购书记录、采集资料与根目录验证截图由 `.gitignore` 排除，保留在开发电脑上。
+本地环境配置、数据库备份、浏览器配置、个人购书记录、采集资料与根目录验证截图由 `.gitignore` 排除，保留在开发电脑上。
+
+## 产品 / 领域文档
+
+Reading Map 的当前业务语义以项目级 Domain Skill 为准：
+
+`.codex/skills/reading-map-domain-model/SKILL.md`
+
+仓库协作与优先级规则见 `AGENTS.md`。`docs/` 中的文件是来源/操作参考，不是产品架构权威；旧架构、旧 handoff 与一次性 QA 通过 Git history 追溯，不应被用来恢复当前行为。
+
+Research 和来源书单整理的具体工作流分别位于：
+
+- `.codex/skills/catalog-research-worker/SKILL.md`
+- `.codex/skills/wild-reading-list-to-json/SKILL.md`
 
 ## 本地启动
 
@@ -48,16 +62,6 @@ npm run dev
 
 `backend/app/`、`backend/alembic/`、`backend/tests/` 以及部分旧维护脚本来自迁移前的 FastAPI 实现，保留供历史参考；历史 ASGI 路径 `app.main:app` 现在也指向 Django，避免绕过现有鉴权。不要运行旧数据库重置脚本来初始化当前系统。
 
-## 领域约定
-
-- `catalog_entities` 统一标识 book、animation、reading_system、series、level、set；ISBN 属于独立作品 Work。
-- Collection 支持嵌套，`collection_items` 只保存直接成员关系。
-- 来源资料先进入 Research 和审核暂存，人工确认后才写入正式 Catalog。
-- 一条书单推荐记录代表来源真正推荐的对象；强推只由来源明确强调或人工确认产生。
-- 人工草稿、推荐语与图片选择必须保留，客观 Research 和 AI 推导分别存储。
-
-修改审核、Research、Catalog 写入或推荐行为前，阅读 [审核工作台稳定行为约定](docs/review-workflow-contract.md)。流程说明见 [审核实现文档](docs/review-workflow-v1-implementation.md)，Research Worker 规则见 [项目技能](skills/catalog-research-worker/SKILL.md)。
-
 ## 检查
 
 Django 测试使用内存 SQLite，不连接或修改开发 MySQL：
@@ -73,20 +77,20 @@ npm run build
 node scripts/check-auth-redirect.mjs
 ```
 
-从项目根目录检查首版候选文件，包括本地凭据的误复制：
+从项目根目录检查候选提交文件，包括本地凭据误复制：
 
 ```powershell
 backend\.venv\Scripts\python.exe scripts\check_release.py
 ```
 
-该脚本遵循 Git 忽略规则，在尚未初始化 Git 时也可运行；只报告路径、行号和问题类别。初始化 Git 并暂存后，再检查实际 Git 索引：
+初始化 Git 并暂存后，再检查实际 Git 索引：
 
 ```powershell
 backend\.venv\Scripts\python.exe scripts\check_release.py --staged
 ```
 
-检查覆盖常见令牌、私钥、带密码的连接 URL 和本地已知凭据，不能替代人工检查。首版准备范围与排除策略见 [GitHub 发布说明](docs/github-first-release.md)。
+检查覆盖常见令牌、私钥、带密码的连接 URL 和本地已知凭据；自动检查不能替代人工检查。
 
 ## 部署配置
 
-公开部署时设置 `DJANGO_DEBUG=false`，使用独立随机 `DJANGO_SECRET_KEY`、专用数据库凭据、明确的 `DJANGO_ALLOWED_HOSTS` 和 HTTPS 同源反向代理；配置实际邮件服务。Research 浏览器助手目前依赖开发机上的 Chrome 会话。当前发布准备验证的是源码与本地回归，尚未验证生产部署。
+公开部署时设置 `DJANGO_DEBUG=false`，使用独立随机 `DJANGO_SECRET_KEY`、专用数据库凭据、明确的 `DJANGO_ALLOWED_HOSTS` 和 HTTPS 同源反向代理；配置实际邮件服务。Research 浏览器助手目前依赖开发机上的 Chrome 会话。
