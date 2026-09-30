@@ -1,0 +1,4 @@
+interface:
+  display_name: "Wild Reading List to JSON"
+  short_description: "Convert external reading lists into stable source JSON"
+  default_prompt: "Use $wild-reading-list-to-json to convert this reading-list source into schema-valid JSON."
