@@ -10,6 +10,8 @@ from urllib.request import Request, urlopen
 
 from django.conf import settings
 
+from .browser_session import capture_tabs, remember_search
+
 from .amazon_assist import (
     _browser_is_running,
     _browser_lock,
@@ -73,7 +75,7 @@ def _current_jd_product_page():
         pages = _devtools_json("/json")
     except Exception as error:
         raise JdAssistError("无法读取京东辅助浏览器。") from error
-    for page in pages:
+    for page in capture_tabs("jd", pages):
         if page.get("type") == "page" and _jd_sku_from_url(page.get("url", "")):
             return page
     raise JdAssistError("没有找到京东商品详情页；请先在搜索结果中打开正确商品。")
@@ -98,7 +100,7 @@ def jd_browser_status(expected_query: str = "", alternate_titles=None) -> dict:
             }
 
         provider_pages = [
-            page for page in pages
+            page for page in capture_tabs("jd", pages)
             if page.get("type") == "page" and urlsplit(page.get("url", "")).netloc.casefold().endswith("jd.com")
         ]
         product_page = next((page for page in provider_pages if _jd_sku_from_url(page.get("url", ""))), None)
@@ -486,6 +488,10 @@ def open_jd_search(query: str) -> dict:
             raise JdAssistError(f"京东浏览器启动失败：{error}") from error
         if not page:
             raise JdAssistError("Chrome 已打开，但没有找到对应的京东搜索标签页。")
+        try:
+            remember_search("jd", page, _devtools_json("/json"))
+        except Exception:
+            pass
     return {
         "query": normalized,
         "search_url": search_url,

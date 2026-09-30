@@ -1,7 +1,8 @@
 import { CSSProperties, FormEvent, KeyboardEvent as ReactKeyboardEvent, PointerEvent as ReactPointerEvent, ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { ArrowLeft, Baby, BookOpen, Boxes, Check, CheckCircle2, ChevronDown, ChevronLeft, ChevronRight, CircleAlert, CircleHelp, Database, Ellipsis, ExternalLink, Eye, EyeOff, FileInput, Film, ImageIcon, LibraryBig, RefreshCw, Search, ShieldCheck, Sparkles, UserRound, X } from "lucide-react";
-import { api, BrowserSessionStatus, CatalogCategory, CatalogEntity, CatalogTreeNode, Child, Creator, DatabaseTable, DatabaseTableDetail, EntityType, ReadingList, ResearchSubject, ReviewBatch, ReviewItem, ReviewSourceDocument } from "./api/client";
+import { api, BrowserSessionStatus, CatalogCategory, CatalogEntity, CatalogTreeNode, Child, Creator, DatabaseTable, DatabaseTableDetail, EntityType, ReadingList, ResearchSubject, ReviewBatch, ReviewItem, ReviewSourceDocument, catalogAssetUrl } from "./api/client";
 import { SourceDocumentReader } from "./components/review/SourceDocumentReader";
+import { CatalogAdminEditor } from "./components/catalog/CatalogAdminEditor";
 
 type Tab = "catalog" | "lists" | "review" | "children" | "database";
 type SourceImage = { filePath: string; pageOrder?: number | null; fileName?: string | null; directlyLinked: boolean };
@@ -14,6 +15,8 @@ type CatalogDraftFields = {
   aliases: string;
   author: string;
   illustrator: string;
+  translator: string;
+  fictionType: string;
   publisher: string;
   language: string;
   pageCount: string;
@@ -78,7 +81,8 @@ const entityLabels: Record<EntityType, string> = {
   reading_system: "阅读产品线",
   series: "系列",
   level: "级别",
-  set: "组合"
+  set: "组合",
+  franchise: "IP"
 };
 
 const categoryTypeLabels: Record<CatalogCategory["category_type"], string> = {
@@ -89,17 +93,14 @@ const categoryTypeLabels: Record<CatalogCategory["category_type"], string> = {
   reading_form: "Reading Form · 阅读形式",
 };
 const categoryTypes = Object.keys(categoryTypeLabels) as CatalogCategory["category_type"][];
-const reviewEntityTypes: EntityType[] = ["book", "animation", "reading_system", "series", "level", "set"];
-const parentEntityTypes: EntityType[] = ["reading_system", "series", "level", "set"];
+const reviewEntityTypes: EntityType[] = ["book", "animation", "reading_system", "series", "level", "set", "franchise"];
+const parentEntityTypes: EntityType[] = ["reading_system", "series", "level", "set", "franchise"];
 
 type StructureNodeStatus = { key: "create" | "existing" | "suspected" | "conflict"; label: string; blocking: boolean };
 
 function automaticResearchChoice(subject: ResearchSubject): string {
   if (subject.resolved_catalog_entity_id) return String(subject.resolved_catalog_entity_id);
-  const plausible = subject.candidates.filter((candidate) => (candidate.match_score ?? 0) >= 0.82);
-  const strong = plausible.filter((candidate) => (candidate.match_score ?? 0) >= 0.92);
-  if (strong.length === 1 && plausible.length === 1) return String(strong[0].catalog_entity_id);
-  if (!plausible.length) return "create";
+  if (!subject.candidates.length) return "create";
   return "";
 }
 
@@ -141,7 +142,7 @@ function normalizeLanguageCode(value: unknown): string {
 }
 
 function catalogDraftFromSubject(subject: ResearchSubject | null): CatalogDraftFields {
-  if (!subject) return { displayTitle: "", titleEn: "", titleZh: "", aliases: "", author: "", illustrator: "", publisher: "", language: "", pageCount: "", description: "", officialAge: "", ar: "", lexile: "", lexileMin: "", lexileMax: "", cover: "" };
+  if (!subject) return { displayTitle: "", titleEn: "", titleZh: "", aliases: "", author: "", illustrator: "", translator: "", fictionType: "unknown", publisher: "", language: "", pageCount: "", description: "", officialAge: "", ar: "", lexile: "", lexileMin: "", lexileMax: "", cover: "" };
   const inferred = inferBilingualTitle(subject.proposed_display_title || "");
   const facts = subject.facts_json;
   const titleEn = subject.proposed_title_en == null ? inferred.titleEn : subject.proposed_title_en.trim();
@@ -154,6 +155,8 @@ function catalogDraftFromSubject(subject: ResearchSubject | null): CatalogDraftF
     aliases: (subject.proposed_aliases || []).join("，"),
     author: draftText(factValue(facts, "author")),
     illustrator: draftText(factValue(facts, "illustrator")),
+    translator: draftText(factValue(facts, "translator")),
+    fictionType: draftText(factValue(facts, "fiction_type")) || "unknown",
     publisher: draftText(factValue(facts, "publisher")),
     language: capturedLanguage || (titleEn ? "en" : titleZh ? "zh" : ""),
     pageCount: draftText(factValue(facts, "page_count")),
@@ -187,16 +190,15 @@ function changedDraftFacts(subject: ResearchSubject, draft: CatalogDraftFields):
   const values: Array<[string, keyof CatalogDraftFields, string]> = [
     ["author", "author", draft.author],
     ["illustrator", "illustrator", draft.illustrator],
-    ["publisher", "publisher", draft.publisher],
+    ["translator", "translator", draft.translator],
+    ["fiction_type", "fictionType", draft.fictionType],
     ["language", "language", draft.language],
-    ["page_count", "pageCount", draft.pageCount],
     ["description", "description", draft.description],
     ["official_age", "officialAge", draft.officialAge],
     ["ar", "ar", draft.ar],
     ["lexile", "lexile", draft.lexile],
     ["lexile_min", "lexileMin", draft.lexileMin],
     ["lexile_max", "lexileMax", draft.lexileMax],
-    ["cover", "cover", draft.cover],
   ];
   const factValues: Record<string, unknown> = {};
   const clearFactKeys: string[] = [];
@@ -207,7 +209,7 @@ function changedDraftFacts(subject: ResearchSubject, draft: CatalogDraftFields):
       clearFactKeys.push(key);
       return;
     }
-    factValues[key] = ["page_count", "lexile_min", "lexile_max"].includes(key) ? Number(value) : value;
+    factValues[key] = ["lexile_min", "lexile_max"].includes(key) ? Number(value) : value;
   });
   return { factValues, clearFactKeys };
 }
@@ -501,7 +503,7 @@ function CatalogView({ entities, counts, query, setQuery, onSearch, onCreated }:
   const visibleEntities = useMemo(() => entities.filter((entity) => {
     if (view === "books") return entity.entity_type === "book";
     if (view === "animation") return entity.entity_type === "animation";
-    return ["reading_system", "series", "level", "set"].includes(entity.entity_type);
+    return ["reading_system", "series", "level", "set", "franchise"].includes(entity.entity_type);
   }), [entities, view]);
 
   function openEntity(entity: CatalogEntity) {
@@ -558,7 +560,7 @@ function CatalogDetailView({ entityId, fallbackEntity, onBack }: { entityId: num
     void api.entity(entityId).then(async (nextEntity) => {
       if (!active) return;
       setEntity(nextEntity);
-      if (!["reading_system", "series", "level", "set"].includes(nextEntity.entity_type)) {
+      if (!["reading_system", "series", "level", "set", "franchise"].includes(nextEntity.entity_type)) {
         setBooks([]);
         return;
       }
@@ -586,10 +588,11 @@ function CatalogDetailView({ entityId, fallbackEntity, onBack }: { entityId: num
     <button className="catalog-back" type="button" onClick={onBack}><ArrowLeft size={16} />返回 Catalog</button>
     <section className="catalog-detail-hero">
       <CatalogCover entity={heroCover} className="catalog-detail-cover" />
-      <div><div className="catalog-detail-kicker"><span className="badge">{entityLabels[entity.entity_type]}</span><small>Catalog #{entity.id}</small><button type="button" className={`catalog-bookshelf-toggle${entity.bookshelf_visible ? " visible" : ""}`} disabled={visibilityBusy} aria-pressed={entity.bookshelf_visible} onClick={() => void toggleBookshelf()}>{entity.bookshelf_visible ? <Eye size={14} /> : <EyeOff size={14} />}Bookshelf · {visibilityBusy ? "保存中…" : entity.bookshelf_visible ? "显示" : "隐藏"}</button></div><h2>{entity.display_title}</h2>{entity.title_zh && entity.title_zh !== entity.display_title ? <p className="catalog-detail-subtitle">{entity.title_zh}</p> : null}<p>{entity.description || "暂无内容介绍。"}</p><div className="catalog-detail-meta">{entity.entity_type !== "animation" ? <span>Lexile {lexile}</span> : <span>内容类型 动画</span>}{entity.work?.author_text ? <span>作者 {entity.work.author_text}</span> : null}{entity.work?.page_count ? <span>{entity.work.page_count} 页</span> : null}{entity.volume_count ? <span>{entity.volume_count} 册</span> : null}</div></div>
+      <div><div className="catalog-detail-kicker"><span className="badge">{entityLabels[entity.entity_type]}</span><small>Catalog #{entity.id}</small><button type="button" className={`catalog-bookshelf-toggle${entity.bookshelf_visible ? " visible" : ""}`} disabled={visibilityBusy} aria-pressed={entity.bookshelf_visible} onClick={() => void toggleBookshelf()}>{entity.bookshelf_visible ? <Eye size={14} /> : <EyeOff size={14} />}Bookshelf · {visibilityBusy ? "保存中…" : entity.bookshelf_visible ? "显示" : "隐藏"}</button></div><h2>{entity.display_title}</h2>{entity.title_zh && entity.title_zh !== entity.display_title ? <p className="catalog-detail-subtitle">{entity.title_zh}</p> : null}<p>{entity.description || "暂无内容介绍。"}</p><div className="catalog-detail-meta">{entity.entity_type !== "animation" ? <span>Lexile {lexile}</span> : <span>内容类型 动画</span>}{entity.work?.author_text ? <span>作者 {entity.work.author_text}</span> : null}{entity.editions[0]?.page_count ? <span>{entity.editions[0].page_count} 页</span> : null}{entity.volume_count ? <span>{entity.volume_count} 册</span> : null}</div></div>
     </section>
     {entity.entity_type === "book" ? <section className="catalog-facts"><h3>作品资料</h3><dl><div><dt>英文标题</dt><dd>{entity.title_en || "—"}</dd></div><div><dt>中文标题</dt><dd>{entity.title_zh || "—"}</dd></div><div><dt>ISBN</dt><dd>{entity.isbns.map((isbn) => isbn.isbn_val).join("、") || "—"}</dd></div><div><dt>自主阅读</dt><dd>{entity.independent_reading_suitable == null ? "待评估" : entity.independent_reading_suitable ? "适合" : "不适合"}</dd></div></dl></section> : entity.entity_type === "animation" ? <section className="catalog-facts"><h3>动画资料</h3><dl><div><dt>英文标题</dt><dd>{entity.title_en || "—"}</dd></div><div><dt>中文标题</dt><dd>{entity.title_zh || "—"}</dd></div><div><dt>对象类型</dt><dd>动画</dd></div><div><dt>Bookshelf</dt><dd>{entity.bookshelf_visible ? "显示" : "隐藏"}</dd></div></dl></section> : <section className="catalog-volume-section"><div className="catalog-section-heading"><div><p className="eyebrow">INCLUDED BOOKS</p><h3>收录作品</h3></div><span>{books.length} 本</span></div>{books.length ? <div className="catalog-book-grid">{books.map((book) => <button type="button" key={book.id} onClick={() => { window.history.pushState(null, "", `/admin/catalog/${book.id}${window.location.search}`); window.dispatchEvent(new PopStateEvent("popstate")); }}><CatalogCover entity={book} /><strong>{book.display_title}</strong><small>{book.work?.author_text || "作者待补充"}</small></button>)}</div> : <div className="empty">这个结构下还没有直接或间接关联的单本作品。</div>}</section>}
     {entity.categories.length ? <div className="catalog-detail-tags">{entity.categories.map((category) => <span key={category.id}>{category.name_zh}</span>)}</div> : null}
+    <CatalogAdminEditor entity={entity} onUpdated={setEntity} />
   </article>;
 }
 
@@ -708,12 +711,19 @@ function ReviewView({ lists, onResolved }: { lists: ReadingList[]; onResolved: (
   const [memberImageSelection, setMemberImageSelection] = useState<ProductImageSelection>(() => productImageSelectionFromSubject(null));
   const [memberProposalType, setMemberProposalType] = useState<EntityType | "">("");
   const [selectedCategoryIds, setSelectedCategoryIds] = useState<number[]>([]);
+  const [structureCategoryIds, setStructureCategoryIds] = useState<Record<number, number[]>>({});
   const [primaryCategoryByType, setPrimaryCategoryByType] = useState<Record<string, number | null>>({});
   const [lastResult, setLastResult] = useState<ReviewItem | null>(null);
   const [draft, setDraft] = useState<CatalogDraftFields>(() => catalogDraftFromSubject(null));
   const [draftImageSelection, setDraftImageSelection] = useState<ProductImageSelection>(() => productImageSelectionFromSubject(null));
   const [proposalType, setProposalType] = useState<EntityType | "">("");
   const [identityChoice, setIdentityChoice] = useState<"new" | number | null>(null);
+  const [candidateDetail, setCandidateDetail] = useState<{ subjectId: number; entity: CatalogEntity } | null>(null);
+  const [matchedEntity, setMatchedEntity] = useState<CatalogEntity | null>(null);
+  const [guideDrafts, setGuideDrafts] = useState<Record<number, string>>({});
+  const [recommendedEditionDraftId, setRecommendedEditionDraftId] = useState<number | null>(null);
+  const [recommendedEditionId, setRecommendedEditionId] = useState<number | null>(null);
+  const [coverChoiceByDraft, setCoverChoiceByDraft] = useState<Record<number, string>>({});
   const [structureAction, setStructureAction] = useState("");
   const [productStatus, setProductStatus] = useState("");
   const [productStatusTone, setProductStatusTone] = useState<"info" | "success" | "error">("info");
@@ -724,9 +734,12 @@ function ReviewView({ lists, onResolved }: { lists: ReadingList[]; onResolved: (
   const [officialStatus, setOfficialStatus] = useState<BrowserSessionStatus | null>(null);
   const [officialSessionActive, setOfficialSessionActive] = useState(false);
   const [officialOperation, setOfficialOperation] = useState<"search" | "capture" | "">("");
+  const [unifiedCapturePending, setUnifiedCapturePending] = useState(false);
   const [officialMessage, setOfficialMessage] = useState("");
   const [officialMessageTone, setOfficialMessageTone] = useState<"info" | "success" | "error">("info");
   const [reviewHeaderCompact, setReviewHeaderCompact] = useState(false);
+  const [batchContextOpen, setBatchContextOpen] = useState(false);
+  const [toolbarOverflowOpen, setToolbarOverflowOpen] = useState(false);
   const [classificationStatus, setClassificationStatus] = useState("");
   const [activeRetailer, setActiveRetailer] = useState<"amazon" | "jd">(storedRetailer);
   const [queueWidth, setQueueWidth] = useState(() => Math.max(REVIEW_QUEUE_MIN, storedPaneWidth("reading-map-review-queue-width", 280)));
@@ -804,7 +817,8 @@ function ReviewView({ lists, onResolved }: { lists: ReadingList[]; onResolved: (
   const catalogFieldsDirty = JSON.stringify(draft) !== JSON.stringify(initialDraft)
     || proposalType !== (primary?.proposed_entity_type || "");
   const draftImagesDirty = productImageSelectionKey(draftImageSelection) !== productImageSelectionKey(initialImageSelection);
-  const draftDirty = catalogFieldsDirty || draftImagesDirty;
+  const guideDirtyIds = selected?.subjects.filter((subject) => guideDrafts[subject.id] !== undefined && guideDrafts[subject.id] !== (subject.guide_markdown_draft || "")).map((subject) => subject.id) || [];
+  const draftDirty = catalogFieldsDirty || draftImagesDirty || guideDirtyIds.length > 0;
   const parentSubjects = selected?.subjects.filter((subject) => subject.subject_role === "discovered_parent") ?? [];
   const memberStructureSubjects = selected?.subjects.filter((subject) => !["primary", "discovered_parent"].includes(subject.subject_role)) ?? [];
   const structureSubjects = [...parentSubjects, ...memberStructureSubjects];
@@ -901,13 +915,14 @@ function ReviewView({ lists, onResolved }: { lists: ReadingList[]; onResolved: (
   });
 
   useEffect(() => {
-    setSelectedStructure([]); setStructureChoices({}); setBookshelfVisibility({}); setBookshelfCustomMode(false);
+    setSelectedStructure([]); setStructureChoices({}); setStructureCategoryIds({}); setBookshelfVisibility({}); setBookshelfCustomMode(false);
     setProductStatus(""); setProductStatusTone("info"); setBrowserStatus(null); setProductQuery(defaultProductQuery);
     setOfficialStatus(null); setOfficialSessionActive(false); setOfficialOperation(""); setOfficialMessage(""); setOfficialMessageTone("info");
     officialCaptureInFlightRef.current = false; officialCapturedUrlRef.current = "";
-    setClassificationStatus(""); setIdentityChoice(null); setStructureAction(""); setHierarchyInspectorId(null);
+    setClassificationStatus(""); setIdentityChoice(null); setCandidateDetail(null); setMatchedEntity(null); setGuideDrafts({}); setRecommendedEditionDraftId(null); setRecommendedEditionId(null); setCoverChoiceByDraft({}); setStructureAction(""); setHierarchyInspectorId(null);
     if (detailRef.current) detailRef.current.scrollTop = 0;
     setReviewHeaderCompact(false);
+    setBatchContextOpen(false); setToolbarOverflowOpen(false);
   }, [selectedId]);
   useEffect(() => {
     try { window.sessionStorage.setItem("reading-map-review-retailer", activeRetailer); } catch { /* Session preference is optional. */ }
@@ -988,16 +1003,17 @@ function ReviewView({ lists, onResolved }: { lists: ReadingList[]; onResolved: (
     return () => { live = false; window.clearInterval(timer); };
   }, [officialSessionActive, selected?.id]);
   useEffect(() => {
-    if (!officialStatus?.capture_ready || !officialStatus.current_url) return;
-    if (officialCapturedUrlRef.current === officialStatus.current_url || officialCaptureInFlightRef.current) return;
-    void captureCurrentOfficial(officialStatus.current_url);
-  }, [officialStatus?.capture_ready, officialStatus?.current_url]);
-  useEffect(() => {
     if (!primary) return;
     const choice = automaticResearchChoice(primary);
     setIdentityChoice(choice === "create" ? "new" : choice ? Number(choice) : null);
     setHierarchyInspectorId((current) => current && [primary, ...structureSubjects].some((subject) => subject.id === current) ? current : primary.id);
   }, [primary?.id, primary?.resolved_catalog_entity_id, primary?.candidates]);
+  useEffect(() => {
+    if (typeof identityChoice !== "number") { setMatchedEntity(null); return; }
+    let live = true;
+    void api.entity(identityChoice).then((entity) => { if (live) setMatchedEntity(entity); }).catch((reason) => setError(String(reason)));
+    return () => { live = false; };
+  }, [identityChoice]);
   useEffect(() => {
     if (!primary) return;
     const next: Record<number, boolean> = {};
@@ -1114,7 +1130,13 @@ function ReviewView({ lists, onResolved }: { lists: ReadingList[]; onResolved: (
         category_decisions: decision === "ignore" ? [] : selectedCategoryIds.map((categoryId) => {
           const category = categories.find((row) => row.id === categoryId);
           return { category_id: categoryId, is_primary: !!category && primaryCategoryByType[category.category_type] === categoryId };
-        })
+        }),
+        structure_category_decisions: decision === "ignore" ? [] : included.map((subject) => ({
+          subject_id: subject.id,
+          category_ids: structureCategoryIds[subject.id] ?? (Array.isArray(asRecord(subject.ai_inferences_json).classification_prefill_ids) ? asRecord(subject.ai_inferences_json).classification_prefill_ids as number[] : []),
+        })),
+        recommended_edition_id: recommendedEditionId,
+        recommended_edition_draft_id: recommendedEditionDraftId,
       });
       setLastResult(result);
       await onResolved();
@@ -1129,11 +1151,7 @@ function ReviewView({ lists, onResolved }: { lists: ReadingList[]; onResolved: (
     setBusy(true); setError("");
     try {
       const refreshed = await api.refreshResearchCandidates(primary.id);
-      setIdentityChoice(refreshed.candidates.length === 0
-        ? "new"
-        : refreshed.candidates.length === 1
-          ? refreshed.candidates[0].catalog_entity_id
-          : null);
+      setIdentityChoice(refreshed.candidates.length === 0 ? "new" : null);
       await loadItems(batchId, selected?.id);
     } catch (reason) { setError(reason instanceof Error ? reason.message : "候选刷新失败"); }
     finally { setBusy(false); }
@@ -1153,25 +1171,13 @@ function ReviewView({ lists, onResolved }: { lists: ReadingList[]; onResolved: (
     }
   }
 
-  function chooseProductProvider(provider: "amazon" | "jd") {
-    const retailerLabel = provider === "jd" ? "京东" : "Amazon";
-    if (provider !== activeRetailer) setBrowserStatus(null);
-    setActiveRetailer(provider);
-    setProductStatusTone("info");
-    setProductStatus(`已选择 ${retailerLabel} · 点击右侧“搜索”打开商品搜索`);
-    window.setTimeout(() => setProductStatus((current) => current.startsWith(`已选择 ${retailerLabel}`) ? "" : current), 2600);
-  }
-
   async function searchProduct(provider: "amazon" | "jd") {
     if (!selected || !primary) return;
     const retailerLabel = provider === "jd" ? "京东" : "Amazon";
-    if (draftDirty) {
-      setProductStatusTone("error");
-      setProductStatus(`Catalog Draft 已修改，请先保存草稿，再搜索${retailerLabel}。`); return;
-    }
     setActiveRetailer(provider); setBrowserStatus(null); setBrowserSessionActive(false);
-    setProductOperation("search"); setProductStatusTone("info"); setProductStatus(`正在启动${retailerLabel}辅助浏览器…`);
+    setProductOperation("search"); setProductStatusTone("info"); setProductStatus(draftDirty ? "正在先保存当前草稿…" : `正在启动${retailerLabel}辅助浏览器…`);
     try {
+      if (draftDirty) await persistCatalogDraft();
       const query = productQuery.trim() || undefined;
       const result = provider === "jd" ? await api.searchJd(selected.id, query) : await api.searchAmazon(selected.id, query);
       setBrowserSessionActive(true);
@@ -1189,15 +1195,13 @@ function ReviewView({ lists, onResolved }: { lists: ReadingList[]; onResolved: (
     } finally { setProductOperation(""); }
   }
 
-  async function captureCurrentProduct() {
+  async function captureCurrentProduct(provider: "amazon" | "jd") {
     if (!selected || !primary) return;
-    if (draftDirty) {
-      setError("Catalog Draft 已修改，请先保存草稿，再采集当前商品。"); return;
-    }
-    const retailerLabel = activeRetailer === "jd" ? "京东" : "Amazon";
+    const retailerLabel = provider === "jd" ? "京东" : "Amazon";
     setProductOperation("capture"); setProductStatusTone("info"); setProductStatus(`正在读取你选中的${retailerLabel}商品…`);
     try {
-      const result = activeRetailer === "jd" ? await api.captureJd(selected.id) : await api.captureAmazon(selected.id);
+      if (draftDirty) await persistCatalogDraft();
+      const result = provider === "jd" ? await api.captureJd(selected.id) : await api.captureAmazon(selected.id);
       await loadItems(batchId, selected.id);
       setProductStatusTone("success");
       setProductStatus(`${retailerLabel}商品资料已采集${result.capture.identifier ? ` · ${result.capture.identifier}` : ""}${result.capture.image_count ? ` · ${result.capture.image_count} 张图片` : ""}`);
@@ -1228,7 +1232,7 @@ function ReviewView({ lists, onResolved }: { lists: ReadingList[]; onResolved: (
         message: "Google 结果已就绪，请打开正确的出版社或作者官网",
       });
       setOfficialMessageTone("success");
-      setOfficialMessage(`已搜索“${result.query}” · 打开正确官网后将自动采集`);
+      setOfficialMessage(`已搜索“${result.query}” · 打开正确官网后点击采集按钮`);
       window.setTimeout(() => setOfficialMessage((current) => current.startsWith("已搜索") ? "" : current), 3200);
     } catch (reason) {
       setOfficialMessageTone("error");
@@ -1266,6 +1270,50 @@ function ReviewView({ lists, onResolved }: { lists: ReadingList[]; onResolved: (
     }
   }
 
+  async function captureCurrentPage() {
+    if (!selected || !primary || unifiedCapturePending) return;
+    setUnifiedCapturePending(true);
+    setProductStatusTone("info");
+    setProductStatus("正在识别辅助浏览器中的可采集页面…");
+    try {
+      const providers = ["amazon", "jd", "official"] as const;
+      const statuses = await Promise.all(providers.map((provider) => api.browserSessionStatus(selected.id, provider)));
+      const ready = statuses.filter((status) => status.capture_ready && status.current_url);
+      if (!ready.length) throw new Error("没有找到与当前审核项匹配的详情页；请先在辅助浏览器中打开目标页面。");
+      if (ready.length > 1) throw new Error("辅助浏览器中有多个可采集详情页；请关闭无关标签页后重试，避免采错来源。");
+      const target = ready[0];
+      if (target.provider === "official") {
+        setProductStatus("");
+        setOfficialStatus(target);
+        await captureCurrentOfficial(target.current_url);
+      } else {
+        setActiveRetailer(target.provider);
+        setBrowserStatus(target);
+        await captureCurrentProduct(target.provider);
+      }
+    } catch (reason) {
+      setProductStatusTone("error");
+      setProductStatus(reason instanceof Error ? reason.message : "识别可采集页面失败");
+    } finally {
+      setUnifiedCapturePending(false);
+    }
+  }
+
+  async function captureScoped(scope: "edition" | "structure", provider: "amazon" | "jd" | "official") {
+    if (!selected || !primary) return;
+    setBusy(true); setError("");
+    try {
+      if (draftDirty) await persistCatalogDraft();
+      const result = scope === "edition"
+        ? await api.captureEdition(selected.id, provider)
+        : await api.captureStructure(selected.id, provider);
+      setItems((current) => current.map((item) => item.id === result.item.id ? result.item : item));
+      if (scope === "structure") setStructureAction(`已补充 ${"relation_ids" in result ? result.relation_ids.length : 0} 条直接关系候选。`);
+      else setProductStatus("Edition 候选已保存，请在下方确认版本。");
+    } catch (reason) { setError(reason instanceof Error ? reason.message : `${scope} 采集失败`); }
+    finally { setBusy(false); }
+  }
+
   async function persistCatalogDraft(): Promise<ReviewItem> {
     if (!primary || !selected || !proposalTitle.trim() || !proposalType) throw new Error("请先填写显示名称和对象类型");
     let updated = selected;
@@ -1276,8 +1324,55 @@ function ReviewView({ lists, onResolved }: { lists: ReadingList[]; onResolved: (
       await api.updateProductImages(primary.id, draftImageSelection.detailUrls, draftImageSelection.cover);
       updated = await api.reviewItem(selected.id);
     }
+    for (const subjectId of guideDirtyIds) {
+      updated = await api.saveGuideDraft(selected.id, subjectId, guideDrafts[subjectId]);
+    }
+    if (guideDirtyIds.length) setGuideDrafts({});
     setItems((current) => current.map((item) => item.id === updated.id ? updated : item));
     return updated;
+  }
+
+  async function inspectCandidate(subject: ResearchSubject, catalogEntityId: number) {
+    try {
+      setCandidateDetail({ subjectId: subject.id, entity: await api.entity(catalogEntityId) });
+    } catch (reason) { setError(reason instanceof Error ? reason.message : "Catalog 候选详情加载失败"); }
+  }
+
+  function confirmCandidate(same: boolean) {
+    if (!candidateDetail || !primary) return;
+    if (candidateDetail.subjectId === primary.id) {
+      setIdentityChoice(same ? candidateDetail.entity.id : "new");
+      setMatchedEntity(same ? candidateDetail.entity : null);
+    }
+    else setStructureChoices((current) => ({ ...current, [candidateDetail.subjectId]: same ? String(candidateDetail.entity.id) : "create" }));
+    setCandidateDetail(null);
+  }
+
+  async function addGuideMaterial(subject: ResearchSubject, raw: string, title: string) {
+    if (!selected) return;
+    setBusy(true); setError("");
+    try {
+      if (draftDirty) await persistCatalogDraft();
+      const result = await api.addGuideMaterial(selected.id, subject.id, raw, title);
+      setItems((current) => current.map((item) => item.id === result.id ? result : item));
+    } catch (reason) { setError(reason instanceof Error ? reason.message : "Guide 资料保存失败"); }
+    finally { setBusy(false); }
+  }
+
+  async function decideEditionDraft(draftId: number, status: "confirmed" | "rejected", coverLocalPath?: string) {
+    if (!selected) return;
+    setBusy(true); setError("");
+    try {
+      if (draftDirty) await persistCatalogDraft();
+      const result = await api.decideEditionDraft(selected.id, draftId, {
+        review_status: status,
+        ...(coverLocalPath ? { proposed_data: { cover_local_path: coverLocalPath } } : {}),
+      });
+      setItems((current) => current.map((item) => item.id === result.id ? result : item));
+      if (status === "confirmed") { setRecommendedEditionDraftId(draftId); setRecommendedEditionId(null); }
+      else if (recommendedEditionDraftId === draftId) setRecommendedEditionDraftId(null);
+    } catch (reason) { setError(reason instanceof Error ? reason.message : "Edition 决定保存失败"); }
+    finally { setBusy(false); }
   }
 
   async function saveCatalogDraft() {
@@ -1394,9 +1489,11 @@ function ReviewView({ lists, onResolved }: { lists: ReadingList[]; onResolved: (
         proposed_display_title: parentTitle.trim(),
         proposed_title_en: inferred.titleEn || null,
         proposed_title_zh: inferred.titleZh || null,
+        category_ids: parentType === "series" && childSubjectId === primary?.id ? selectedCategoryIds : [],
       });
       await loadItems(batchId, selected.id);
       setSelectedStructure((current) => [...new Set([...current, result.parent_subject_id])]);
+      if (parentType === "series" && childSubjectId === primary?.id) setStructureCategoryIds((current) => ({ ...current, [result.parent_subject_id]: [...selectedCategoryIds] }));
       setHierarchyInspectorId(result.parent_subject_id);
       setStructureAction("新父级已进入结构树；若无异常候选，将随整体提交自动创建。");
     } catch (reason) { setError(reason instanceof Error ? reason.message : "父级结构暂存失败"); }
@@ -1598,7 +1695,7 @@ function ReviewView({ lists, onResolved }: { lists: ReadingList[]; onResolved: (
   const selectedNewStructures = selectedStructureSubjects.filter((subject) => !subject.resolved_catalog_entity_id && structureChoiceFor(subject) === "create").length;
   const selectedExistingStructures = selectedStructureSubjects.length - selectedNewStructures;
   const draftCoverCount = (draftImageSelection.cover ? 1 : 0) + selectedMemberSubjects.filter((subject) => !!factValue(subject.facts_json, "cover")).length;
-  const canSubmit = !!identityChoice && !draftDirty && !primary?.pending_conflict_count && !unresolvedStructureChoices.length && !conflictingStructureSubjects.length && !disconnectedStructureSubjects.length && !!proposalType;
+  const canSubmit = !!identityChoice && !draftDirty && !unresolvedStructureChoices.length && !disconnectedStructureSubjects.length && !!proposalType;
   const memberChoice = memberDetailSubject ? structureChoiceFor(memberDetailSubject) : "";
   const memberIdentityChoice: "new" | number | null = memberChoice === "create" ? "new" : memberChoice ? Number(memberChoice) : null;
 
@@ -1633,21 +1730,27 @@ function ReviewView({ lists, onResolved }: { lists: ReadingList[]; onResolved: (
     </div> : null}
     <header className={`review-workspace-header${reviewHeaderCompact ? " compact" : ""}`}>
       <div className="review-workspace-identity">
-        <p>REVIEW WORKSPACE</p>
         <div><h1>审核工作台</h1>{currentBatch ? <span>批次 #{currentBatch.id} · {currentBatch.resolved_items}/{currentBatch.total_items}</span> : null}</div>
       </div>
-      <label className="review-batch-select"><span>当前批次</span><select value={batchId ?? ""} onChange={(event) => setBatchId(event.target.value ? Number(event.target.value) : null)} disabled={!batches.length}><option value="">暂无审核批次</option>{batches.map((batch) => <option key={batch.id} value={batch.id}>{batch.source_name || `批次 #${batch.id}`} · {batch.resolved_items}/{batch.total_items} · {reviewStatusLabel(batch.status)}</option>)}</select></label>
-      <div className="review-header-actions">
-        <button className={`review-import-toggle${importOpen ? " active" : ""}`} type="button" onClick={() => setImportOpen((current) => !current)}><FileInput size={16} />导入审核</button>
-        <details className="review-overflow-menu">
-          <summary aria-label="更多审核工具"><Ellipsis size={18} /></summary>
-          <div>
-            {batchId ? <button type="button" onClick={() => setSourceReaderBatch(batchId)}><FileInput size={15} />查看原始 JSON</button> : null}
-            {batchId ? <a href="/django-admin/reviews/reviewdataconflict/" target="_blank" rel="noreferrer"><CircleAlert size={15} />数据冲突</a> : null}
-            {batchId ? <button type="button" disabled={busy || !safeMatches.length} onClick={bulkConfirm}><CheckCircle2 size={15} />确认历史匹配{safeMatches.length ? ` (${safeMatches.length})` : ""}</button> : null}
-            {currentBatch ? <p>批次 #{currentBatch.id}<br />{currentTargetList ? `${currentTargetList.creator_name} / ${currentTargetList.title}` : "仅写入 Catalog"}</p> : null}
-          </div>
-        </details>
+      <button className="review-context-trigger" type="button" aria-expanded={batchContextOpen} onClick={() => setBatchContextOpen((open) => !open)}>
+        <span>{currentBatch?.source_name || (currentBatch ? `批次 #${currentBatch.id}` : "暂无审核批次")}</span>
+        {currentBatch ? <span className="review-context-progress">{currentBatch.resolved_items}/{currentBatch.total_items} · {reviewStatusLabel(currentBatch.status)}</span> : null}
+        <ChevronDown size={15} />
+      </button>
+      <div className={`review-header-controls${batchContextOpen ? " open" : ""}`}>
+        <label className="review-batch-select"><span>当前批次</span><select value={batchId ?? ""} onChange={(event) => { setBatchId(event.target.value ? Number(event.target.value) : null); setBatchContextOpen(false); }} disabled={!batches.length}><option value="">暂无审核批次</option>{batches.map((batch) => <option key={batch.id} value={batch.id}>{batch.source_name || `批次 #${batch.id}`} · {batch.resolved_items}/{batch.total_items} · {reviewStatusLabel(batch.status)}</option>)}</select></label>
+        <div className="review-header-actions">
+          <button className={`review-import-toggle${importOpen ? " active" : ""}`} type="button" onClick={() => { setImportOpen((current) => !current); setBatchContextOpen(false); }}><FileInput size={16} />导入审核</button>
+          <details className="review-overflow-menu">
+            <summary aria-label="更多审核工具"><Ellipsis size={18} /></summary>
+            <div>
+              {batchId ? <button type="button" onClick={() => setSourceReaderBatch(batchId)}><FileInput size={15} />查看原始 JSON</button> : null}
+              {batchId ? <a href="/django-admin/reviews/reviewdataconflict/" target="_blank" rel="noreferrer"><CircleAlert size={15} />数据冲突</a> : null}
+              {batchId ? <button type="button" disabled={busy || !safeMatches.length} onClick={bulkConfirm}><CheckCircle2 size={15} />确认历史匹配{safeMatches.length ? ` (${safeMatches.length})` : ""}</button> : null}
+              {currentBatch ? <p>批次 #{currentBatch.id}<br />{currentTargetList ? `${currentTargetList.creator_name} / ${currentTargetList.title}` : "仅写入 Catalog"}</p> : null}
+            </div>
+          </details>
+        </div>
       </div>
     </header>
     <div className="review-compact-top">
@@ -1689,28 +1792,34 @@ function ReviewView({ lists, onResolved }: { lists: ReadingList[]; onResolved: (
       </aside>
       <div className="review-resizer queue-resizer" role="separator" aria-label="调整左侧审核队列宽度" aria-orientation="vertical" aria-valuemin={REVIEW_QUEUE_MIN} aria-valuemax={paneWidthLimit("queue")} aria-valuenow={queueWidth} tabIndex={0} title="拖动调整左侧宽度" onPointerDown={(event) => startPaneResize("queue", event)} onKeyDown={(event) => resizePaneWithKeyboard("queue", event)} />
 
-      <section ref={detailRef} className="review-detail" onScroll={(event) => setReviewHeaderCompact(event.currentTarget.scrollTop > 30)}>
+      <section ref={detailRef} className="review-detail" onScroll={(event) => { const compact = event.currentTarget.scrollTop > 30; setReviewHeaderCompact(compact); if (!compact) { setBatchContextOpen(false); setToolbarOverflowOpen(false); } }}>
         {selected && primary ? <>
-          <div className="review-item-toolbar">
+          <div className={`review-item-toolbar${reviewHeaderCompact ? " compact" : ""}`}>
             <div className="review-item-toolbar-title"><div><small>Item #{selected.id} · 来源位置 {selected.position ?? "—"}</small><h2>{primary.proposed_display_title || String(selected.raw_payload.raw_title || "未命名")}</h2></div><span className={`review-status ${selected.status}`}>{reviewStatusLabel(selected.status)}</span></div>
             <div className="review-item-tools">
               <div className="product-tool-row">
-                <span className="tool-label">平台</span>
-                <div className="provider-switch" aria-label="商品平台">
-                  <button type="button" aria-pressed={activeRetailer === "amazon"} title="选择 Amazon，再点击右侧搜索" className={activeRetailer === "amazon" ? "active" : ""} onClick={() => chooseProductProvider("amazon")}>Amazon</button>
-                  <button type="button" aria-pressed={activeRetailer === "jd"} title="选择京东，再点击右侧搜索" className={activeRetailer === "jd" ? "active" : ""} onClick={() => chooseProductProvider("jd")}>京东</button>
-                </div>
-                <input className="product-query" value={productQuery} onChange={(event) => setProductQuery(event.target.value)} placeholder={defaultProductQuery || "搜索名称"} aria-label="商品搜索词" />
-                <button type="button" className="tool-action" disabled={busy || !!selected.decision || !primary.proposed_display_title || !!productOperation} onClick={() => void searchProduct(activeRetailer)}>{productOperation === "search" ? <RefreshCw className="spin" size={14} /> : <Search size={14} />}{browserSessionActive ? "重新搜索" : "搜索"}</button>
-                <button type="button" className="tool-action capture" disabled={busy || !!selected.decision || draftDirty || productOperation === "capture" || !browserStatus?.capture_ready} onClick={() => void captureCurrentProduct()}>{productOperation === "capture" ? <RefreshCw className="spin" size={14} /> : <FileInput size={14} />}{browserStatus?.capture_ready ? "采集当前页" : "等待商品详情页"}</button>
+                <input className="product-query" value={productQuery} onChange={(event) => setProductQuery(event.target.value)} placeholder={defaultProductQuery || "搜索名称"} aria-label="搜索词" />
+                <button type="button" className="tool-action search-amazon" disabled={busy || !!selected.decision || !primary.proposed_display_title || !!productOperation || !!officialOperation || unifiedCapturePending} onClick={() => void searchProduct("amazon")}>{productOperation === "search" && activeRetailer === "amazon" ? <RefreshCw className="spin" size={14} /> : <Search size={14} />}搜索 Amazon</button>
+                <button type="button" className="tool-action search-jd" disabled={busy || !!selected.decision || !primary.proposed_display_title || !!productOperation || !!officialOperation || unifiedCapturePending} onClick={() => void searchProduct("jd")}>{productOperation === "search" && activeRetailer === "jd" ? <RefreshCw className="spin" size={14} /> : <Search size={14} />}搜索京东</button>
+                <button type="button" className="tool-action search-official" disabled={busy || !!selected.decision || !!officialOperation || !!productOperation || unifiedCapturePending} onClick={() => void searchOfficial()} title="有未保存修改时会先保存草稿；打开正确官网后手动采集"><Search size={14} />搜索官方资料</button>
+                <button type="button" className="tool-action capture" disabled={busy || !!selected.decision || !!productOperation || !!officialOperation || unifiedCapturePending} onClick={() => void captureCurrentPage()}>{unifiedCapturePending || productOperation === "capture" || officialOperation === "capture" ? <RefreshCw className="spin" size={14} /> : <FileInput size={14} />}{unifiedCapturePending || productOperation === "capture" || officialOperation === "capture" ? "采集中…" : "采集当前页"}</button>
+              </div>
+              <div className="review-promoted-tools">
+                <button type="button" className="tool-action" disabled={busy || !!selected.decision || !browserStatus?.capture_ready} onClick={() => void captureScoped("structure", activeRetailer)} title="从当前商品页采集结构">采集商品结构</button>
+                <button type="button" className="tool-action" disabled={busy || !!selected.decision || !officialStatus?.capture_ready} onClick={() => void captureScoped("structure", "official")} title="从当前官网页采集结构">采集官网结构</button>
+              </div>
+              <button className="review-tool-overflow-trigger" type="button" aria-label="更多采集与 Research 操作" aria-expanded={toolbarOverflowOpen} onClick={() => setToolbarOverflowOpen((open) => !open)}><Ellipsis size={18} /></button>
+              <div className={`review-secondary-tools${toolbarOverflowOpen ? " open" : ""}`}>
+              <div className="retailer-scope-tools">
+                <span className="tool-label">商品</span>
+                <button type="button" disabled={busy || !!selected.decision || !browserStatus?.capture_ready} onClick={() => void captureScoped("edition", activeRetailer)}>采集当前版本</button>
               </div>
               <div className="research-tool-compact">
                 <span className="tool-label">Research</span>
-                <button type="button" disabled={busy || !!selected.decision || !!officialOperation} onClick={() => void searchOfficial()} title="有未保存修改时会先保存草稿；打开正确官网后自动采集"><Search size={13} />{officialSessionActive ? "重新搜索官网" : "搜索官方资料"}</button>
-                <button type="button" className="official-capture" disabled={busy || !!selected.decision || officialOperation === "capture" || !officialStatus?.capture_ready} onClick={() => void captureCurrentOfficial()}>{officialOperation === "capture" ? <RefreshCw className="spin" size={13} /> : <FileInput size={13} />}{officialStatus?.capture_ready ? "立即采集" : "等待官网页"}</button>
+                <button type="button" disabled={busy || !!selected.decision || !officialStatus?.capture_ready} onClick={() => void captureScoped("edition", "official")}>采集当前版本</button>
                 <button type="button" disabled={busy} onClick={() => void loadItems(batchId, selected.id).catch((reason) => setError(String(reason)))}><RefreshCw size={13} />刷新结果</button>
               </div>
-            </div>
+              <div className="review-toolbar-sessions">
             {browserStatus || productStatus ? <div className={`browser-session-state${browserStatus?.capture_ready ? " ready" : ""}${productStatus ? ` ${productStatusTone}` : ""}`} role="status">
               <span className="session-dot" />
               <strong>{productStatus || browserStatus?.message}</strong>
@@ -1723,7 +1832,23 @@ function ReviewView({ lists, onResolved }: { lists: ReadingList[]; onResolved: (
               {!officialMessage && officialStatus?.product_title ? <span>{officialStatus.product_title}</span> : null}
               {officialStatus?.current_url ? <a href={officialStatus.current_url} target="_blank" rel="noreferrer" aria-label="打开当前官网页面"><ExternalLink size={13} /></a> : null}
             </div> : null}
+              </div>
+              </div>
+            </div>
+            {productStatus && productStatusTone === "error" ? <div className="review-toolbar-error" role="alert">{productStatus}</div> : null}
+            {officialMessage && officialMessageTone === "error" ? <div className="review-toolbar-error" role="alert">{officialMessage}</div> : null}
           </div>
+          {candidateDetail ? <div className="catalog-identity-overlay" role="dialog" aria-modal="true" aria-label="Catalog 身份详情">
+            <div className="catalog-identity-dialog">
+              <header><strong>判断是否为同一 Entity</strong><button type="button" onClick={() => setCandidateDetail(null)} aria-label="关闭"><X size={16} /></button></header>
+              <h3>{candidateDetail.entity.display_title}</h3>
+              <p>#{candidateDetail.entity.id} · {entityLabels[candidateDetail.entity.entity_type]}</p>
+              <p>{candidateDetail.entity.description || "暂无简介"}</p>
+              {candidateDetail.entity.work ? <p>作者：{candidateDetail.entity.work.author_text || "—"}　绘者：{candidateDetail.entity.work.illustrator_text || "—"}　译者：{candidateDetail.entity.work.translator_text || "—"}</p> : null}
+              {candidateDetail.entity.editions.length ? <div className="catalog-identity-editions">{candidateDetail.entity.editions.map((edition) => <article key={edition.id}>{edition.cover_local_path ? <img src={catalogAssetUrl(edition.cover_local_path)} alt="版本封面" /> : <span>无封面</span>}<small>Edition #{edition.id}<br />{edition.isbns.map((isbn) => isbn.isbn_val).join("、") || "无 ISBN"}<br />{edition.format || ""} {edition.page_count ? `${edition.page_count} 页` : ""}</small></article>)}</div> : null}
+              <footer><button type="button" onClick={() => confirmCandidate(false)}>不是，创建新 Entity</button><button type="button" onClick={() => confirmCandidate(true)}>确认同一 Entity</button></footer>
+            </div>
+          </div> : null}
           <div className="review-progress" aria-label="当前审核进度">
             <ReviewProgressStep label="Research" complete={["ready", "partial"].includes(primary.research_status)} value={reviewStatusLabel(primary.research_status)} />
             <ReviewProgressStep label="商品资料" complete={productCaptured} value={productCaptured ? "已采集" : "待补充"} />
@@ -1762,6 +1887,9 @@ function ReviewView({ lists, onResolved }: { lists: ReadingList[]; onResolved: (
                   entityType={hierarchyProposalType}
                   dirty={hierarchyDraftDirty}
                   statusCounts={hierarchyStatusCounts}
+                  categories={categories}
+                  selectedCategoryIds={structureCategoryIds[hierarchyInspectorSubject?.id || 0] ?? (Array.isArray(asRecord(hierarchyInspectorSubject?.ai_inferences_json).classification_prefill_ids) ? asRecord(hierarchyInspectorSubject?.ai_inferences_json).classification_prefill_ids as number[] : [])}
+                  onCategoryIdsChange={(ids) => hierarchyInspectorSubject && setStructureCategoryIds((current) => ({ ...current, [hierarchyInspectorSubject.id]: ids }))}
                   disabled={busy || !!selected.decision}
                   choiceFor={(subject) => subject.id === primary.id ? (identityChoice === "new" ? "create" : identityChoice ? String(identityChoice) : "") : structureChoiceFor(subject)}
                   onToggle={toggleStructure}
@@ -1771,13 +1899,23 @@ function ReviewView({ lists, onResolved }: { lists: ReadingList[]; onResolved: (
                   onBookshelfCustomMode={setBookshelfCustomMode}
                   onDraftChange={(next) => { if (next.displayTitle !== hierarchyDraft.displayTitle && hierarchyInspectorSubject) setStructureChoices((current) => ({ ...current, [hierarchyInspectorSubject.id]: "" })); setHierarchyDraft(next); }}
                   onTypeChange={(next) => { setHierarchyProposalType(next); if (hierarchyInspectorSubject?.id === primary.id) setIdentityChoice(null); else if (hierarchyInspectorSubject) setStructureChoices((current) => ({ ...current, [hierarchyInspectorSubject.id]: "" })); }}
-                  onChoice={(subject, value) => subject.id === primary.id ? setIdentityChoice(value === "create" ? "new" : value ? Number(value) : null) : setStructureChoices((current) => ({ ...current, [subject.id]: value }))}
+                  onChoice={(subject, value) => value && value !== "create"
+                    ? void inspectCandidate(subject, Number(value))
+                    : subject.id === primary.id ? setIdentityChoice(value === "create" ? "new" : null) : setStructureChoices((current) => ({ ...current, [subject.id]: value }))}
                   onSave={() => void saveHierarchyDraft()}
                   onRefresh={() => void refreshHierarchyCandidates()}
                   onCreateParent={(childId, type, title) => void createParentStructure(childId, type, title)}
                   onAddRelation={(parentId, memberId) => void addHierarchyRelation(parentId, memberId)}
                   onDeleteRelation={(relationId) => void deleteHierarchyRelation(relationId)}
                   onResolveConflict={(conflictId, status) => void resolveHierarchyConflict(conflictId, status)}
+                  guideControl={hierarchyInspectorSubject ? <GuideDraftEditor
+                    key={hierarchyInspectorSubject.id}
+                    subject={hierarchyInspectorSubject}
+                    value={guideDrafts[hierarchyInspectorSubject.id] ?? hierarchyInspectorSubject.guide_markdown_draft ?? ""}
+                    disabled={busy || !!selected.decision}
+                    onChange={(value) => setGuideDrafts((current) => ({ ...current, [hierarchyInspectorSubject.id]: value }))}
+                    onAdd={(raw, title) => void addGuideMaterial(hierarchyInspectorSubject, raw, title)}
+                  /> : null}
                 />
               </> : null}
               onDraftChange={(next) => {
@@ -1786,13 +1924,34 @@ function ReviewView({ lists, onResolved }: { lists: ReadingList[]; onResolved: (
               }}
               onTypeChange={(next) => { setProposalType(next); setIdentityChoice(null); }}
               onRefreshCandidates={() => void refreshCandidates()}
-              onIdentityChoice={setIdentityChoice}
+              onIdentityChoice={(value) => value === "new" || value === null ? setIdentityChoice(value) : void inspectCandidate(primary, value)}
               imageSelection={draftImageSelection}
               onProductImagesChange={setDraftImageSelection}
+            />
+            <GuideDraftEditor
+              subject={primary}
+              value={guideDrafts[primary.id] ?? primary.guide_markdown_draft ?? ""}
+              disabled={busy || !!selected.decision}
+              onChange={(value) => setGuideDrafts((current) => ({ ...current, [primary.id]: value }))}
+              onAdd={(raw, title) => void addGuideMaterial(primary, raw, title)}
             />
             <div className="draft-footer"><p>Research 只负责预填。这里显示的值才是最终提交草稿，人工修改优先。鼠标位于本表单时可按 Ctrl+S 保存。</p><button disabled={busy || !!selected.decision || !proposalTitle || !proposalType || !draftDirty} onClick={() => void saveCatalogDraft()}>{busy ? "保存中…" : "保存草稿"}</button></div>
           </ReviewSection>
           </div>
+          {proposalType === "book" ? <ReviewSection eyebrow="EDITION · REVIEW DRAFT" title="推荐版本" tone="facts">
+            <p className="section-help">版本可以稀疏；只有确认的版本才会写入 Catalog，并可成为本条书单的推荐版本。</p>
+            {matchedEntity?.editions.length ? <div className="edition-draft-list"><strong>已有 Catalog 版本</strong>{matchedEntity.editions.map((edition) => <label key={edition.id} className="edition-draft-row"><input type="radio" name="recommended-edition" checked={recommendedEditionId === edition.id} onChange={() => { setRecommendedEditionId(edition.id); setRecommendedEditionDraftId(null); }} />{edition.cover_local_path ? <img src={catalogAssetUrl(edition.cover_local_path)} alt="已有版本封面" /> : null}<span>#{edition.id} · {edition.isbns.map((isbn) => isbn.isbn_val).join("、") || "无 ISBN"} · {edition.format || "装帧未知"} · {edition.page_count ?? "—"} 页</span></label>)}</div> : null}
+            {selected.edition_drafts.length ? <div className="edition-draft-list"><strong>采集到的版本候选</strong>{selected.edition_drafts.map((edition) => {
+              const data = edition.proposed_data;
+              const covers = (Array.isArray(data.cover_choices) ? data.cover_choices : []).map(asRecord);
+              return <div className="edition-draft-row" key={edition.id}>
+                <div><strong>候选 #{edition.id} · {edition.review_status}</strong><p>ISBN：{Array.isArray(data.isbns) ? data.isbns.join("、") : "—"} · {String(data.publisher || "出版社未知")} · {String(data.format || "装帧未知")} · {String(data.page_count || "—")} 页</p>
+                  {covers.length ? <div className="edition-cover-options">{covers.map((cover, index) => <label key={index}><input type="radio" name={`edition-cover-${edition.id}`} checked={(coverChoiceByDraft[edition.id] || data.cover_local_path || covers[0]?.local_path) === cover.local_path} disabled={!cover.local_path || busy} onChange={() => setCoverChoiceByDraft((current) => ({ ...current, [edition.id]: String(cover.local_path) }))} />{cover.source_url ? <img src={catalogAssetUrl(String(cover.local_path || cover.source_url))} alt={`候选封面 ${index + 1}`} /> : null}</label>)}</div> : null}
+                  {edition.review_status === "proposed" ? <div><button type="button" disabled={busy} onClick={() => void decideEditionDraft(edition.id, "confirmed", coverChoiceByDraft[edition.id] || String(data.cover_local_path || ""))}>确认版本</button><button type="button" disabled={busy} onClick={() => void decideEditionDraft(edition.id, "rejected")}>舍弃</button></div> : edition.review_status === "confirmed" ? <label><input type="radio" name="recommended-edition" checked={recommendedEditionDraftId === edition.id} onChange={() => { setRecommendedEditionDraftId(edition.id); setRecommendedEditionId(null); }} />推荐这个版本</label> : null}
+                </div>
+              </div>;
+            })}</div> : <p className="muted">尚未采集版本；推荐版本可以留空。</p>}
+          </ReviewSection> : null}
           <ReviewSection eyebrow="RESEARCH TOOLS · 仅补充草稿" title="商品 / 官方补资料" tone="facts">
             <div className="research-tool-row"><div><strong>{productCaptured ? "商品资料已采集" : "尚未采集商品资料"}</strong><p>使用当前 Item 顶部工具条搜索与采集；结果只预填 Catalog Draft，不会直接写入正式库。</p></div></div>
             {productCaptured ? <details className="capture-results"><summary>查看字段证据与来源</summary><ProductCaptureResults subject={primary} disabled={busy || !!selected.decision} showImages={false} /></details> : null}
@@ -1817,7 +1976,7 @@ function ReviewView({ lists, onResolved }: { lists: ReadingList[]; onResolved: (
                   ? <p>复用历史确认 #{subject.resolved_catalog_entity_id}</p>
                   : !subject.candidates.length
                     ? <p className="structure-identity-auto"><Check size={13} />Catalog 未找到，提交时自动新建 {entityLabels[subject.proposed_entity_type || "book"]} Entity</p>
-                    : <select aria-label={`${subject.proposed_display_title} 的身份决定`} value={structureChoiceFor(subject)} onChange={(event) => setStructureChoices((current) => ({ ...current, [subject.id]: event.target.value }))}><option value="">存在多个或低置信度候选，请确认…</option><option value="create">以上均不是，提交时新建</option>{subject.candidates.map((candidate) => <option key={candidate.catalog_entity_id} value={candidate.catalog_entity_id}>复用 #{candidate.catalog_entity_id} · {candidate.display_title}</option>)}</select>
+                    : <select aria-label={`${subject.proposed_display_title} 的身份决定`} value={structureChoiceFor(subject)} onChange={(event) => event.target.value && event.target.value !== "create" ? void inspectCandidate(subject, Number(event.target.value)) : setStructureChoices((current) => ({ ...current, [subject.id]: event.target.value }))}><option value="">存在多个候选，请查看详情…</option><option value="create">以上均不是，提交时新建</option>{subject.candidates.map((candidate) => <option key={candidate.catalog_entity_id} value={candidate.catalog_entity_id}>查看 #{candidate.catalog_entity_id} · {candidate.display_title}</option>)}</select>
                   : null}
                 </div>;
               })}</div>
@@ -1882,7 +2041,7 @@ function CollectionBriefList({ subjects }: { subjects: ResearchSubject[] }) {
   </section>;
 }
 
-function HierarchyReviewWorkspace({ primary, subjects, relatedSubjects, rows, selectedIds, selectedSubject, bookshelfVisibility, bookshelfCustomMode, draft, entityType, dirty, statusCounts, disabled, choiceFor, onToggle, onSelect, onBookshelfToggle, onBookshelfBatch, onBookshelfCustomMode, onDraftChange, onTypeChange, onChoice, onSave, onRefresh, onCreateParent, onAddRelation, onDeleteRelation, onResolveConflict }: {
+function HierarchyReviewWorkspace({ primary, subjects, relatedSubjects, rows, selectedIds, selectedSubject, bookshelfVisibility, bookshelfCustomMode, draft, entityType, dirty, statusCounts, categories, selectedCategoryIds, onCategoryIdsChange, disabled, choiceFor, onToggle, onSelect, onBookshelfToggle, onBookshelfBatch, onBookshelfCustomMode, onDraftChange, onTypeChange, onChoice, onSave, onRefresh, onCreateParent, onAddRelation, onDeleteRelation, onResolveConflict, guideControl }: {
   primary: ResearchSubject;
   subjects: ResearchSubject[];
   relatedSubjects: ResearchSubject[];
@@ -1895,6 +2054,9 @@ function HierarchyReviewWorkspace({ primary, subjects, relatedSubjects, rows, se
   entityType: EntityType | "";
   dirty: boolean;
   statusCounts: Record<StructureNodeStatus["key"], number>;
+  categories: CatalogCategory[];
+  selectedCategoryIds: number[];
+  onCategoryIdsChange: (ids: number[]) => void;
   disabled: boolean;
   choiceFor: (subject: ResearchSubject) => string;
   onToggle: (subjectId: number) => void;
@@ -1911,6 +2073,7 @@ function HierarchyReviewWorkspace({ primary, subjects, relatedSubjects, rows, se
   onAddRelation: (parentId: number, memberId: number) => void;
   onDeleteRelation: (relationId: number) => void;
   onResolveConflict: (conflictId: number, status: "keep_existing" | "use_proposed" | "ignored") => void;
+  guideControl?: ReactNode;
 }) {
   const [parentToAdd, setParentToAdd] = useState("");
   const [memberToAdd, setMemberToAdd] = useState("");
@@ -2005,7 +2168,9 @@ function HierarchyReviewWorkspace({ primary, subjects, relatedSubjects, rows, se
           <div className="relation-add-row"><select value={memberToAdd} disabled={disabled || !possibleMembers.length} onChange={(event) => setMemberToAdd(event.target.value)}><option value="">添加已有节点为直接成员…</option>{possibleMembers.map((subject) => <option key={subject.id} value={subject.id}>{subject.proposed_display_title} · {entityLabels[subject.proposed_entity_type || "set"]}</option>)}</select><button type="button" disabled={disabled || !memberToAdd} onClick={() => { onAddRelation(selectedSubject.id, Number(memberToAdd)); setMemberToAdd(""); }}>添加</button></div>
         </section>
 
-        <section className="inspector-section source-inspector"><header><div><strong>Research 来源</strong><small>{selectedSubject.sources.length} 个来源</small></div></header>{selectedSubject.sources.length ? <div>{selectedSubject.sources.map((source) => <a key={source.id} href={source.source_url} target="_blank" rel="noreferrer"><ExternalLink size={11} /><span>{source.source_title || source.source_url}</span></a>)}</div> : <p className="muted">暂无来源链接</p>}</section>
+        <section className="inspector-section"><header><strong>节点 Classification</strong></header><div className="catalog-admin-categories">{categories.map((category) => <label key={category.id}><input type="checkbox" disabled={disabled} checked={selectedCategoryIds.includes(category.id)} onChange={(event) => onCategoryIdsChange(event.target.checked ? [...selectedCategoryIds, category.id] : selectedCategoryIds.filter((id) => id !== category.id))} />{category.name_zh}</label>)}</div></section>
+        <section className="inspector-section">{guideControl}</section>
+        <section className="inspector-section source-inspector"><header><div><strong>Research 来源</strong><small>{selectedSubject.sources.length} 个来源</small></div></header>{selectedSubject.sources.length ? <div>{selectedSubject.sources.map((source) => /^https?:\/\//.test(source.source_url) ? <a key={source.id} href={source.source_url} target="_blank" rel="noreferrer"><ExternalLink size={11} /><span>{source.source_title || source.source_url}</span></a> : <span key={source.id}>{source.source_title || "手工资料"}</span>)}</div> : <p className="muted">暂无来源链接</p>}</section>
       </aside>
     </div>
   </section>;
@@ -2048,7 +2213,7 @@ function CatalogDraftEditor({ subject, draft, entityType, entityTypes = reviewEn
     return [...new Set(labels)].join(" + ");
   };
   const conflicts: Array<{ label: string; field: keyof CatalogDraftFields; primary: string; primarySource: string; alternative: string; alternativeSource: string }> = [
-    ["作者", "author", "author"], ["绘者", "illustrator", "illustrator"], ["出版社", "publisher", "publisher"], ["页数", "pageCount", "page_count"], ["简介", "description", "description"],
+    ["作者", "author", "author"], ["绘者", "illustrator", "illustrator"], ["译者", "translator", "translator"], ["简介", "description", "description"],
   ].flatMap(([label, field, factKey]) => {
     const primary = draftText(factValue(facts, factKey));
     if (!primary) return [];
@@ -2077,16 +2242,16 @@ function CatalogDraftEditor({ subject, draft, entityType, entityTypes = reviewEn
     <div className="catalog-draft-grid">
       <div className="draft-input draft-title-identity wide"><span>显示名称<button type="button" disabled={identityDisabled} onClick={onRefreshCandidates}><Search size={13} />查是否已有 Entity</button></span><input aria-label="显示名称" disabled={disabled} value={draft.displayTitle} onChange={(event) => update("displayTitle", event.target.value)} /></div>
       {identityChoice !== null || subject.candidates.length ? <div className="inline-identity-result wide">
-        {subject.candidates.length ? subject.candidates.map((candidate) => <button type="button" key={candidate.id} className={identityChoice === candidate.catalog_entity_id ? "selected" : ""} disabled={identityDisabled} onClick={() => onIdentityChoice(candidate.catalog_entity_id)}>{identityChoice === candidate.catalog_entity_id ? <Check size={13} /> : null}<span><strong>{candidate.display_title}</strong><small>#{candidate.catalog_entity_id} · {entityLabels[candidate.entity_type as EntityType] || candidate.entity_type} · 匹配分 {Math.round((candidate.match_score ?? 0) * 100)}</small></span></button>) : <p><CheckCircle2 size={15} />未发现已有 Entity，提交时创建新的 {entityType ? entityLabels[entityType] : "Entity"}</p>}
+        {subject.candidates.length ? <>{subject.candidates.map((candidate) => <button type="button" key={candidate.id} className={identityChoice === candidate.catalog_entity_id ? "selected" : ""} disabled={identityDisabled} onClick={() => onIdentityChoice(candidate.catalog_entity_id)}>{identityChoice === candidate.catalog_entity_id ? <Check size={13} /> : null}<span><strong>{candidate.display_title}</strong><small>查看 #{candidate.catalog_entity_id} · {entityLabels[candidate.entity_type as EntityType] || candidate.entity_type} · 匹配分 {Math.round((candidate.match_score ?? 0) * 100)}</small></span></button>)}<button type="button" className={identityChoice === "new" ? "selected" : ""} disabled={identityDisabled} onClick={() => onIdentityChoice("new")}>以上均不是，创建新 Entity</button></> : <p><CheckCircle2 size={15} />未发现已有 Entity，提交时创建新的 {entityType ? entityLabels[entityType] : "Entity"}</p>}
       </div> : null}
       <DraftInput label="英文名" value={draft.titleEn} onChange={(value) => update("titleEn", value)} disabled={disabled} />
       <DraftInput label="中文名" value={draft.titleZh} onChange={(value) => update("titleZh", value)} disabled={disabled} />
       <DraftInput label="别名" value={draft.aliases} onChange={(value) => update("aliases", value)} disabled={disabled} wide hint="多个别名用逗号分隔" />
       <DraftInput label="作者" value={draft.author} onChange={(value) => update("author", value)} disabled={disabled} source={sourceLabel("author")} />
       <DraftInput label="绘者" value={draft.illustrator} onChange={(value) => update("illustrator", value)} disabled={disabled} source={sourceLabel("illustrator")} />
-      <DraftInput label="出版社" value={draft.publisher} onChange={(value) => update("publisher", value)} disabled={disabled} source={sourceLabel("publisher")} />
+      <DraftInput label="译者" value={draft.translator} onChange={(value) => update("translator", value)} disabled={disabled} source={sourceLabel("translator")} />
+      <label className="draft-input"><span>虚构属性</span><select disabled={disabled} value={draft.fictionType} onChange={(event) => update("fictionType", event.target.value)}><option value="unknown">未知</option><option value="fiction">虚构</option><option value="nonfiction">非虚构</option><option value="mixed">混合</option></select></label>
       <DraftSelect label="语言" value={draft.language} onChange={(value) => update("language", value)} disabled={disabled} source={sourceLabel("language")} options={languageOptions} />
-      <DraftInput label="页数" type="number" value={draft.pageCount} onChange={(value) => update("pageCount", value)} disabled={disabled} source={sourceLabel("page_count")} />
       <label className="draft-input wide"><span>简介{sourceLabel("description") ? <em>{sourceLabel("description")}</em> : null}</span><textarea rows={4} disabled={disabled} value={draft.description} onChange={(event) => update("description", event.target.value)} /></label>
       <DraftInput label="官方 / 出版社建议年龄" value={draft.officialAge} onChange={(value) => update("officialAge", value)} disabled={disabled} source={sourceLabel("official_age")} />
       <DraftInput label="AR" value={draft.ar} onChange={(value) => update("ar", value)} disabled={disabled} source={sourceLabel("ar")} action={<a href="https://www.arbookfind.com/" target="_blank" rel="noreferrer"><ExternalLink size={11} />官方查询</a>} />
@@ -2097,7 +2262,7 @@ function CatalogDraftEditor({ subject, draft, entityType, entityTypes = reviewEn
           <DraftInput label="Lexile 最高值" type="number" value={draft.lexileMax} onChange={(value) => update("lexileMax", value)} disabled={disabled} source={sourceLabel("lexile_max")} />
         </>}
     </div>
-    {factValue(facts, "product_images") ? <div className="draft-product-images"><div className="draft-product-images-heading"><strong>封面与详情图</strong><span>每张图均可设为封面，也可独立保留为详情图；随草稿一起保存。</span></div><ProductCaptureResults subject={subject} disabled={disabled} selection={imageSelection} onSelectionChange={onProductImagesChange} showFacts={false} /></div> : null}
+    {factValue(facts, "product_images") ? <div className="draft-product-images"><div className="draft-product-images-heading"><strong>Work 内页预览</strong><span>勾选可作为内容预览的内页图片；封面在 Edition 区域确认。</span></div><ProductCaptureResults subject={subject} disabled={disabled} selection={imageSelection} onSelectionChange={onProductImagesChange} showFacts={false} showCoverSelection={false} /></div> : null}
     {conflicts.map((conflict) => <div className="draft-conflict" key={`${conflict.label}-${conflict.alternativeSource}`}><CircleAlert size={16} /><div><strong>{conflict.label}存在来源冲突</strong><button type="button" className={draft[conflict.field] === conflict.primary ? "selected" : ""} onClick={() => update(conflict.field, conflict.primary)}>{draft[conflict.field] === conflict.primary ? <Check size={12} /> : null}{conflict.primary} <small>{conflict.primarySource}</small></button><button type="button" className={draft[conflict.field] === conflict.alternative ? "selected" : ""} onClick={() => update(conflict.field, conflict.alternative)}>{draft[conflict.field] === conflict.alternative ? <Check size={12} /> : null}{conflict.alternative} <small>{conflict.alternativeSource}</small></button></div></div>)}
     <div className="difficulty-inline"><div><small>Difficulty / AI 辅助</small><strong>AR {draft.ar || "NULL"}　·　Lexile {entityType === "book" ? draft.lexile || "NULL" : draft.lexileMin && draft.lexileMax ? `${draft.lexileMin}–${draft.lexileMax}L` : "NULL"}</strong></div><p>Cognitive：{cognitive ? <DataValue value={cognitive} /> : "NULL"} <span>缺失不会阻断审核</span></p></div>
   </>;
@@ -2648,13 +2813,30 @@ function FactGrid({ facts, sources = [] }: { facts?: Record<string, unknown> | n
   })}</div>;
 }
 
-function ProductCaptureResults({ subject, disabled, selection, onSelectionChange, showImages = true, showFacts = true }: {
+function GuideDraftEditor({ subject, value, disabled, onChange, onAdd }: {
+  subject: ResearchSubject; value: string; disabled: boolean;
+  onChange: (value: string) => void; onAdd: (raw: string, title: string) => void;
+}) {
+  const [raw, setRaw] = useState("");
+  const [title, setTitle] = useState("");
+  return <div className="guide-draft-editor">
+    <strong>Guide · {subject.proposed_display_title}</strong>
+    <p>粘贴原始资料留作 Research 证据，整理后的 Markdown 草稿经人工修改后随审核提交。</p>
+    <input value={title} disabled={disabled} onChange={(event) => setTitle(event.target.value)} placeholder="资料来源或标题（可选）" />
+    <textarea rows={3} value={raw} disabled={disabled} onChange={(event) => setRaw(event.target.value)} placeholder="粘贴文章、笔记或对比资料" />
+    <button type="button" disabled={disabled || !raw.trim()} onClick={() => { onAdd(raw.trim(), title.trim()); setRaw(""); setTitle(""); }}>加入 Research 并生成可编辑草稿</button>
+    <label><span>Guide Markdown Draft</span><textarea rows={6} value={value} disabled={disabled} onChange={(event) => onChange(event.target.value)} placeholder="可在此编辑最终确认的实用指南；Ctrl+S 保存草稿" /></label>
+  </div>;
+}
+
+function ProductCaptureResults({ subject, disabled, selection, onSelectionChange, showImages = true, showFacts = true, showCoverSelection = true }: {
   subject: ResearchSubject;
   disabled: boolean;
   selection?: ProductImageSelection;
   onSelectionChange?: (selection: ProductImageSelection) => void;
   showImages?: boolean;
   showFacts?: boolean;
+  showCoverSelection?: boolean;
 }) {
   const facts = subject.facts_json || {};
   const imageEntry = asRecord(facts.product_images);
@@ -2689,10 +2871,10 @@ function ProductCaptureResults({ subject, disabled, selection, onSelectionChange
         return <article key={`${image.source_url}-${index}`} className={`${keepAsDetail ? "" : "detail-excluded "}${isCover ? "cover-selected" : ""}`.trim()}>
           <div className="product-image-preview">
             <img src={image.source_url} alt={`采集到的商品图 ${index + 1}`} loading="lazy" />
-            <label className={`cover-radio${isCover ? " selected" : ""}`}>
+            {showCoverSelection ? <label className={`cover-radio${isCover ? " selected" : ""}`}>
               <input type="radio" name={`catalog-cover-${subject.id}`} aria-label={`将商品图 ${index + 1} 设为封面`} checked={isCover} disabled={disabled} onChange={() => selectCover(image.source_url)} />
               <span>{isCover ? "封面" : "设为封面"}</span>
-            </label>
+            </label> : null}
           </div>
           <div className="product-image-actions">
             <label><input type="checkbox" checked={keepAsDetail} disabled={disabled} onChange={(event) => toggleDetail(image.source_url, event.target.checked)} />保留详情图</label>

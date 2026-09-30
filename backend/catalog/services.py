@@ -11,7 +11,7 @@ from django.db.models import F, Q
 
 from .models import (
     ALLOWED_ENTITY_TYPES, COLLECTION_ENTITY_TYPES, CatalogEntity, CatalogGraphLock,
-    CatalogCategory, CatalogEntityCategory, CatalogIsbn, CatalogSourceStat, ChildEntityAnnotation, Collection,
+    BookEdition, CatalogCategory, CatalogEntityCategory, CatalogIsbn, CatalogSourceStat, ChildEntityAnnotation, Collection,
     CollectionItem, ReadingListItem, Work,
     normalize_search_text,
 )
@@ -28,6 +28,28 @@ def normalize_isbn(value: str | None) -> tuple[int | None, str | None]:
     if len(normalized) == 13 and normalized.isdigit():
         return 13, normalized
     return None, None
+
+
+def equivalent_isbns(value: str | None) -> set[str]:
+    """Recognize a valid ISBN-10 / 978 ISBN-13 pair for one physical version."""
+    kind, normalized = normalize_isbn(value)
+    if kind is None:
+        return set()
+    result = {normalized}
+    if kind == 10:
+        check = 10 if normalized[-1] == "X" else int(normalized[-1])
+        if (sum((10 - index) * int(digit) for index, digit in enumerate(normalized[:9])) + check) % 11:
+            return result
+        body = "978" + normalized[:9]
+        checksum = (10 - sum((1 if index % 2 == 0 else 3) * int(digit) for index, digit in enumerate(body)) % 10) % 10
+        result.add(body + str(checksum))
+    elif normalized.startswith("978"):
+        if sum((1 if index % 2 == 0 else 3) * int(digit) for index, digit in enumerate(normalized)) % 10:
+            return result
+        body = normalized[3:12]
+        checksum = (11 - sum((10 - index) * int(digit) for index, digit in enumerate(body)) % 11) % 11
+        result.add(body + ("X" if checksum == 10 else str(checksum)))
+    return result
 
 
 @transaction.atomic
@@ -66,7 +88,7 @@ def create_catalog_entity(**values) -> CatalogEntity:
 
 def entity_queryset():
     return CatalogEntity.objects.select_related("work", "collection").prefetch_related(
-        "work__isbns", "categories__category", "reading_pens__reading_pen_model"
+        "work__editions__isbns", "categories__category", "reading_pens__reading_pen_model"
     )
 
 
@@ -159,7 +181,7 @@ def _stage_items(stage_label: str):
     ).select_related(
         "reading_list__creator", "catalog_entity__work", "catalog_entity__collection"
     ).prefetch_related(
-        "catalog_entity__work__isbns", "catalog_entity__categories__category",
+        "catalog_entity__work__editions__isbns", "catalog_entity__categories__category",
         "catalog_entity__reading_pens__reading_pen_model",
     )
 
@@ -281,25 +303,33 @@ def aggregate_stage_entities(
 
 
 @transaction.atomic
-def add_isbn(work_entity_id: int, raw_isbn: str) -> CatalogIsbn:
+def add_isbn(work_entity_id: int, raw_isbn: str, edition_id: int | None = None) -> CatalogIsbn:
     isbn_type, isbn_val = normalize_isbn(raw_isbn)
     if isbn_type is None:
         raise CatalogDomainError("Invalid ISBN")
-    if not Work.objects.filter(pk=work_entity_id).exists():
+    work = Work.objects.filter(pk=work_entity_id).first()
+    if work is None:
         raise CatalogDomainError("ISBN can only be attached to a book Work")
+    edition = BookEdition.objects.filter(pk=edition_id, work=work).first() if edition_id else work.editions.order_by("pk").first()
+    if edition_id and edition is None:
+        raise CatalogDomainError("Edition must belong to this Work")
+    if edition is None:
+        edition = BookEdition.objects.create(work=work)
     existing = CatalogIsbn.objects.filter(isbn_type=isbn_type, isbn_val=isbn_val).first()
     if existing:
-        if existing.work_entity_id != work_entity_id:
+        if existing.edition.work_id != work_entity_id:
             raise CatalogDomainError("ISBN already belongs to another Work")
+        if edition_id and existing.edition_id != edition.pk:
+            raise CatalogDomainError("ISBN already belongs to another Edition")
         return existing
-    return CatalogIsbn.objects.create(work_entity_id=work_entity_id, isbn_type=isbn_type, isbn_val=isbn_val)
+    return CatalogIsbn.objects.create(edition=edition, isbn_type=isbn_type, isbn_val=isbn_val)
 
 
 def find_by_isbn(raw_isbn: str) -> CatalogEntity | None:
     isbn_type, isbn_val = normalize_isbn(raw_isbn)
     if isbn_type is None:
         raise CatalogDomainError("Invalid ISBN")
-    return entity_queryset().filter(work__isbns__isbn_type=isbn_type, work__isbns__isbn_val=isbn_val).first()
+    return entity_queryset().filter(work__editions__isbns__isbn_type=isbn_type, work__editions__isbns__isbn_val=isbn_val).first()
 
 
 @transaction.atomic

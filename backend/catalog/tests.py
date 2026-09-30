@@ -1,12 +1,15 @@
 from django.core.exceptions import ValidationError
-from django.test import TestCase
+from django.test import TestCase, override_settings
 from django.db import connection
 from django.test.utils import CaptureQueriesContext
+from unittest.mock import patch
+from pathlib import Path
+import tempfile
 from rest_framework.test import APIClient
 
 from accounts.models import User
 from catalog.models import (
-    ALLOWED_ENTITY_TYPES, COLLECTION_ENTITY_TYPES, CatalogCategory, CatalogEntity, CatalogEntityCategory,
+    ALLOWED_ENTITY_TYPES, COLLECTION_ENTITY_TYPES, BookEdition, CatalogCategory, CatalogEntity, CatalogEntityCategory, CatalogIsbn,
     CatalogSourceStat, ReadingList, ReadingListCreator, ReadingListItem,
 )
 from catalog.services import (
@@ -14,7 +17,10 @@ from catalog.services import (
     aggregate_stage_entities,
     assign_entity_categories,
     assign_importance_levels,
+    add_isbn, find_by_isbn, search_catalog,
 )
+
+from reviews.models import ResearchSource, ReviewItem
 
 
 class DatabaseBrowserTests(TestCase):
@@ -62,12 +68,14 @@ class DatabaseBrowserTests(TestCase):
         entity.refresh_from_db()
         self.assertTrue(entity.bookshelf_visible)
 
-    def test_catalog_uses_six_entity_types_and_animation_is_not_a_collection(self):
-        self.assertEqual(ALLOWED_ENTITY_TYPES, {"book", "animation", "reading_system", "series", "level", "set"})
+    def test_catalog_uses_seven_entity_types_and_animation_is_not_a_collection(self):
+        self.assertEqual(ALLOWED_ENTITY_TYPES, {"book", "animation", "reading_system", "series", "level", "set", "franchise"})
         self.assertIn("reading_system", COLLECTION_ENTITY_TYPES)
         self.assertNotIn("animation", COLLECTION_ENTITY_TYPES)
         entity = CatalogEntity.objects.create(entity_type="reading_system", display_title="Acorn")
         self.assertEqual(entity.collection.catalog_entity_id, entity.pk)
+        franchise = CatalogEntity.objects.create(entity_type="franchise", display_title="Example IP")
+        self.assertEqual(franchise.collection.catalog_entity_id, franchise.pk)
         animation = CatalogEntity.objects.create(entity_type="animation", display_title="Example Animation")
         self.assertFalse(hasattr(animation, "work"))
         self.assertFalse(hasattr(animation, "collection"))
@@ -77,6 +85,151 @@ class DatabaseBrowserTests(TestCase):
         )
         self.assertEqual(response.status_code, 201, response.data)
         self.assertEqual(response.data["entity_type"], "animation")
+
+
+class EditionAndAdminTests(TestCase):
+    def setUp(self):
+        self.book = CatalogEntity.objects.create(entity_type="book", display_title="A Book")
+        self.admin = User.objects.create_user("edition-admin@example.com", "Wisteria!River@42", is_staff=True)
+        self.client = APIClient()
+        self.client.force_authenticate(self.admin)
+
+    def test_sparse_edition_isbn_uniqueness_and_recommendation_work(self):
+        edition = BookEdition.objects.create(work=self.book.work)
+        self.assertIsNone(edition.page_count)
+        isbn = add_isbn(self.book.pk, "978-0-7636-8086-2", edition.pk)
+        self.assertEqual(isbn.edition_id, edition.pk)
+        other_edition = BookEdition.objects.create(work=self.book.work)
+        with self.assertRaises(CatalogDomainError):
+            add_isbn(self.book.pk, "9780763680862", other_edition.pk)
+        self.assertEqual(find_by_isbn("9780763680862").pk, self.book.pk)
+        other = CatalogEntity.objects.create(entity_type="book", display_title="Other Book")
+        with self.assertRaises(CatalogDomainError):
+            add_isbn(other.pk, "9780763680862")
+        creator = ReadingListCreator.objects.create(name="Creator")
+        reading_list = ReadingList.objects.create(creator=creator, title="List")
+        item = ReadingListItem.objects.create(reading_list=reading_list, catalog_entity=self.book, recommended_edition=edition)
+        self.assertEqual(item.recommended_edition_id, edition.pk)
+        with self.assertRaises(ValidationError):
+            ReadingListItem(reading_list=reading_list, catalog_entity=other, recommended_edition=edition).full_clean()
+
+    def test_work_search_and_catalog_fields(self):
+        self.book.work.author_text = "Kate DiCamillo"
+        self.book.work.illustrator_text = "Chris Van Dusen"
+        self.book.work.translator_text = "李先生"
+        self.book.work.detail_images = ["research_data/interior.jpg"]
+        self.book.work.save()
+        self.book.guide_markdown = "## 阅读方法\n\n先一起读。"
+        self.book.fiction_type = "fiction"
+        self.book.save()
+        for query in ("Kate DiCamillo", "Chris Van Dusen", "李先生"):
+            self.assertEqual(search_catalog(query).get().pk, self.book.pk)
+        with self.assertRaises(ValidationError):
+            CatalogEntity(entity_type="book", display_title="Bad", fiction_type="maybe").full_clean()
+        data = self.client.get(f"/api/catalog/entities/{self.book.pk}").data
+        self.assertEqual(data["work"]["detail_images"], ["research_data/interior.jpg"])
+        self.assertEqual(data["guide_markdown"], "## 阅读方法\n\n先一起读。")
+        self.assertEqual(data["fiction_type"], "fiction")
+
+    def test_catalog_image_fields_reject_external_urls(self):
+        with self.assertRaises(ValidationError):
+            BookEdition.objects.create(work=self.book.work, cover_local_path="https://example.com/cover.jpg")
+        self.book.work.detail_images = ["https://example.com/interior.jpg"]
+        with self.assertRaises(ValidationError):
+            self.book.work.save()
+        self.book.work.refresh_from_db()
+        response = self.client.patch(f"/api/catalog/entities/{self.book.pk}", {
+            "work": {"detail_images": ["https://example.com/interior.jpg"]},
+        }, format="json")
+        self.assertEqual(response.status_code, 400)
+
+    def test_catalog_asset_requires_admin_and_serves_only_local_images(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "backend").mkdir()
+            (root / "research_data").mkdir()
+            (root / "research_data" / "cover.jpg").write_bytes(b"local-image")
+            (root / "research_data" / "notes.txt").write_text("private note")
+            with override_settings(BASE_DIR=root / "backend"):
+                self.assertIn(APIClient().get("/api/catalog-assets/cover.jpg").status_code, {401, 403})
+                response = self.client.get("/api/catalog-assets/cover.jpg")
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(b"".join(response.streaming_content), b"local-image")
+                self.assertEqual(self.client.get("/api/catalog-assets/notes.txt").status_code, 404)
+
+    def test_empty_collection_and_declared_total_are_independent(self):
+        franchise = CatalogEntity.objects.create(entity_type="franchise", display_title="Shared IP")
+        self.assertEqual(franchise.collection.items.count(), 0)
+        franchise.collection.volume_count = 12
+        franchise.collection.save()
+        from catalog.services import add_collection_item
+        add_collection_item(franchise.pk, self.book.pk)
+        franchise.collection.refresh_from_db()
+        self.assertEqual(franchise.collection.volume_count, 12)
+        self.assertEqual(franchise.collection.items.count(), 1)
+
+    def test_admin_detail_loads_work_edition_structure_classification_and_guide(self):
+        edition = BookEdition.objects.create(work=self.book.work, cover_local_path="research_data/cover.jpg", page_count=32)
+        add_isbn(self.book.pk, "9780763680862", edition.pk)
+        parent = CatalogEntity.objects.create(entity_type="series", display_title="A Series")
+        from catalog.services import add_collection_item
+        add_collection_item(parent.pk, self.book.pk)
+        category = CatalogCategory.objects.get(category_type="theme", code="friendship")
+        assign_entity_categories(self.book, [{"category_id": category.pk, "is_primary": True}])
+        self.book.guide_markdown = "## 共读"
+        self.book.save(update_fields=["guide_markdown"])
+        data = self.client.get(f"/api/catalog/entities/{self.book.pk}").data
+        self.assertEqual(data["editions"][0]["isbns"][0]["isbn_val"], "9780763680862")
+        self.assertEqual(data["editions"][0]["page_count"], 32)
+        self.assertEqual(data["parents"][0]["id"], parent.pk)
+        self.assertEqual(data["categories"][0]["code"], "friendship")
+        self.assertEqual(data["guide_markdown"], "## 共读")
+        self.assertIsNone(data["cover_url"])
+
+    @patch("catalog.admin_capture._capture")
+    def test_admin_capture_requires_confirmation_and_does_not_create_review_item(self, capture):
+        capture.return_value = {"source_url": "https://publisher.example/book", "facts": {"author": "New Author", "description": "New synopsis"}}
+        response = self.client.post(f"/api/catalog/entities/{self.book.pk}/admin-capture", {"provider": "official", "scope": "page"}, format="json")
+        self.assertEqual(response.status_code, 200, response.data)
+        self.book.refresh_from_db()
+        self.assertIsNone(self.book.description)
+        self.assertEqual(ReviewItem.objects.count(), 0)
+        confirmed = self.client.post(f"/api/catalog/entities/{self.book.pk}/admin-confirm", {
+            "token": response.data["token"], "selected_fields": ["work.author_text"],
+        }, format="json")
+        self.assertEqual(confirmed.status_code, 200, confirmed.data)
+        self.book.refresh_from_db()
+        self.assertIsNone(self.book.description)
+        self.assertEqual(self.book.work.author_text, "New Author")
+        self.assertEqual(ReviewItem.objects.count(), 0)
+
+    @patch("catalog.admin_capture._capture")
+    def test_admin_unselected_edition_capture_does_not_create_empty_version(self, capture):
+        capture.return_value = {"source_url": "https://publisher.example/book", "facts": {"page_count": 32}}
+        candidate = self.client.post(f"/api/catalog/entities/{self.book.pk}/admin-capture", {
+            "provider": "official", "scope": "edition",
+        }, format="json")
+        self.assertEqual(candidate.status_code, 200, candidate.data)
+        response = self.client.post(f"/api/catalog/entities/{self.book.pk}/admin-confirm", {
+            "token": candidate.data["token"], "selected_fields": [],
+        }, format="json")
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(BookEdition.objects.count(), 0)
+
+    def test_admin_guide_material_stays_draft_until_confirmed(self):
+        response = self.client.post(f"/api/catalog/entities/{self.book.pk}/guide-material", {
+            "raw_content": "原始资料\n如何使用", "source_title": "个人笔记",
+        }, format="json")
+        self.assertEqual(response.status_code, 200, response.data)
+        self.book.refresh_from_db()
+        self.assertIsNone(self.book.guide_markdown)
+        self.assertEqual(ResearchSource.objects.get(source_type="manual_guide").raw_content, "原始资料\n如何使用")
+        confirmed = self.client.post(f"/api/catalog/entities/{self.book.pk}/admin-confirm", {
+            "token": response.data["token"], "selected_fields": ["entity.guide_markdown"], "guide_markdown": "## 人工确认\n\n如何使用",
+        }, format="json")
+        self.assertEqual(confirmed.status_code, 200, confirmed.data)
+        self.book.refresh_from_db()
+        self.assertEqual(self.book.guide_markdown, "## 人工确认\n\n如何使用")
 
 
 class CategoryTaxonomyTests(TestCase):

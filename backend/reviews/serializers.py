@@ -60,7 +60,7 @@ class ResearchSubjectSerializer(serializers.ModelSerializer):
 
 
 CATALOG_DRAFT_FACT_KEYS = {
-    "author", "illustrator", "publisher", "language", "page_count",
+    "author", "illustrator", "translator", "language", "fiction_type",
     "description", "official_age", "ar", "lexile", "lexile_min",
     "lexile_max", "cover",
 }
@@ -122,6 +122,7 @@ class ParentStructureCreateSerializer(serializers.Serializer):
     proposed_display_title = serializers.CharField(max_length=500)
     proposed_title_zh = serializers.CharField(max_length=500, required=False, allow_null=True, allow_blank=True)
     proposed_title_en = serializers.CharField(max_length=500, required=False, allow_null=True, allow_blank=True)
+    category_ids = serializers.ListField(child=serializers.IntegerField(min_value=1), required=False, default=list)
 
     def validate_proposed_display_title(self, value):
         value = value.strip()
@@ -160,6 +161,11 @@ class CategoryDecisionSerializer(serializers.Serializer):
     is_primary = serializers.BooleanField(default=False)
 
 
+class StructureCategoryDecisionSerializer(serializers.Serializer):
+    subject_id = serializers.IntegerField(min_value=1)
+    category_ids = serializers.ListField(child=serializers.IntegerField(min_value=1), default=list)
+
+
 class BookshelfVisibilitySerializer(serializers.Serializer):
     subject_id = serializers.IntegerField(min_value=1)
     visible = serializers.BooleanField()
@@ -173,7 +179,10 @@ class ReviewDecisionSerializer(serializers.Serializer):
     include_structure_subject_ids = serializers.ListField(child=serializers.IntegerField(min_value=1), default=list, max_length=500)
     structure_decisions = StructureDecisionSerializer(many=True, default=list)
     category_decisions = CategoryDecisionSerializer(many=True, default=list, max_length=100)
+    structure_category_decisions = StructureCategoryDecisionSerializer(many=True, default=list, max_length=100)
     bookshelf_visibility = BookshelfVisibilitySerializer(many=True, default=list, max_length=500)
+    recommended_edition_id = serializers.IntegerField(min_value=1, required=False, allow_null=True)
+    recommended_edition_draft_id = serializers.IntegerField(min_value=1, required=False, allow_null=True)
 
     def validate(self, attrs):
         if attrs["decision"] == "match_existing" and attrs.get("catalog_entity_id") is None:
@@ -181,6 +190,21 @@ class ReviewDecisionSerializer(serializers.Serializer):
         if attrs["decision"] != "match_existing" and attrs.get("catalog_entity_id") is not None:
             raise serializers.ValidationError("catalog_entity_id is only valid for match_existing")
         return attrs
+
+
+class EditionDraftDecisionSerializer(serializers.Serializer):
+    review_status = serializers.ChoiceField(choices=["confirmed", "rejected"])
+    matched_catalog_edition_id = serializers.IntegerField(min_value=1, required=False, allow_null=True)
+    proposed_data = serializers.DictField(child=serializers.JSONField(), required=False)
+
+
+class GuideMaterialSerializer(serializers.Serializer):
+    raw_content = serializers.CharField(min_length=1, max_length=50000)
+    source_title = serializers.CharField(max_length=1000, required=False, allow_blank=True)
+
+
+class GuideDraftSerializer(serializers.Serializer):
+    guide_markdown_draft = serializers.CharField(allow_blank=True, max_length=50000)
 
 
 class BulkMatchEntrySerializer(serializers.Serializer):

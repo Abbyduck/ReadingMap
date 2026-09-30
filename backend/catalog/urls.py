@@ -6,10 +6,17 @@ from .database_views import DatabaseTableRowsView, DatabaseTablesView
 
 urlpatterns = [
     path("health", v.HealthView.as_view()),
+    path("catalog-assets/<path:asset_path>", v.CatalogAssetView.as_view()),
     path("database/tables", DatabaseTablesView.as_view()),
     path("database/tables/<str:table_name>", DatabaseTableRowsView.as_view()),
     path("catalog/entities", v.CatalogEntitiesView.as_view()),
     path("catalog/entities/<int:entity_id>", v.CatalogEntityView.as_view()),
+    path("catalog/entities/<int:entity_id>/editions", v.CatalogEditionView.as_view()),
+    path("catalog/entities/<int:entity_id>/editions/<int:edition_id>", v.CatalogEditionView.as_view()),
+    path("catalog/entities/<int:entity_id>/admin-search", v.CatalogAdminSearch.as_view()),
+    path("catalog/entities/<int:entity_id>/admin-capture", v.CatalogAdminCapture.as_view()),
+    path("catalog/entities/<int:entity_id>/admin-confirm", v.CatalogAdminConfirm.as_view()),
+    path("catalog/entities/<int:entity_id>/guide-material", v.CatalogAdminGuideMaterial.as_view()),
     path("catalog/search", v.CatalogSearchView.as_view()),
     path("catalog/entities/<int:entity_id>/isbns", v.IsbnAttachView.as_view()),
     path("catalog/isbn/<str:isbn>", v.IsbnLookupView.as_view()),

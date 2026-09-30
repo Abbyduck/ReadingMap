@@ -22,9 +22,15 @@ class CleanModelSerializer(serializers.ModelSerializer):
 
 
 class WorkSerializer(CleanModelSerializer):
+    page_count = serializers.SerializerMethodField()
+
+    def get_page_count(self, obj):
+        edition = next(iter(obj.editions.all()), None) if obj.pk else None
+        return edition.page_count if edition else None
+
     class Meta:
         model = m.Work
-        fields = ["author_text", "illustrator_text", "language_code", "page_count", "word_count", "headword_count", "ar_level", "lexile_code"]
+        fields = ["author_text", "illustrator_text", "translator_text", "language_code", "detail_images", "page_count", "word_count", "headword_count", "ar_level", "lexile_code"]
 
 
 class CategorySerializer(CleanModelSerializer):
@@ -41,18 +47,39 @@ class IsbnSerializer(serializers.ModelSerializer):
         fields = ["id", "isbn_type", "isbn_val"]
 
 
+class BookEditionSerializer(CleanModelSerializer):
+    isbns = IsbnSerializer(many=True, read_only=True)
+
+    class Meta:
+        model = m.BookEdition
+        fields = ["id", "work_id", "cover_local_path", "publisher", "format", "page_count", "publication_date", "dimensions", "isbns"]
+        read_only_fields = ["id", "work_id"]
+
+
 class CatalogEntitySerializer(serializers.ModelSerializer):
     work = WorkSerializer(read_only=True, allow_null=True)
+    editions = serializers.SerializerMethodField()
+    cover_url = serializers.SerializerMethodField()
     volume_count = serializers.SerializerMethodField()
     lexile_min = serializers.SerializerMethodField()
     lexile_max = serializers.SerializerMethodField()
     isbns = serializers.SerializerMethodField()
     categories = serializers.SerializerMethodField()
     reading_pens = serializers.SerializerMethodField()
+    parents = serializers.SerializerMethodField()
+    members = serializers.SerializerMethodField()
 
     class Meta:
         model = m.CatalogEntity
-        fields = ["id", "entity_type", "display_title", "title_zh", "title_en", "aliases", "description", "extra_info", "cover_url", "cover_local_path", "detail_images", "independent_reading_suitable", "bookshelf_visible", "work", "volume_count", "lexile_min", "lexile_max", "isbns", "categories", "reading_pens"]
+        fields = ["id", "entity_type", "display_title", "title_zh", "title_en", "aliases", "description", "extra_info", "guide_markdown", "fiction_type", "cover_url", "independent_reading_suitable", "bookshelf_visible", "work", "editions", "volume_count", "lexile_min", "lexile_max", "isbns", "categories", "reading_pens", "parents", "members"]
+
+    def get_editions(self, obj):
+        work = getattr(obj, "work", None)
+        return BookEditionSerializer(work.editions.all(), many=True).data if work else []
+
+    def get_cover_url(self, obj):
+        # Compatibility for existing public views; admin uses Edition covers.
+        return obj.cover_url
 
     def get_volume_count(self, obj):
         collection = getattr(obj, "collection", None)
@@ -68,13 +95,22 @@ class CatalogEntitySerializer(serializers.ModelSerializer):
 
     def get_isbns(self, obj):
         work = getattr(obj, "work", None)
-        return IsbnSerializer(work.isbns.all(), many=True).data if work else []
+        return IsbnSerializer([isbn for edition in work.editions.all() for isbn in edition.isbns.all()], many=True).data if work else []
 
     def get_categories(self, obj):
-        return CategorySerializer([link.category for link in obj.categories.all()], many=True).data
+        return [{**CategorySerializer(link.category).data, "is_primary": link.is_primary} for link in obj.categories.all()]
 
     def get_reading_pens(self, obj):
         return [{"id": link.reading_pen_model_id, "name": link.reading_pen_model.name} for link in obj.reading_pens.all()]
+
+    def get_parents(self, obj):
+        return [{"id": row.collection_id, "display_title": row.collection.catalog_entity.display_title, "position": row.position}
+                for row in obj.collection_memberships.select_related("collection__catalog_entity")]
+
+    def get_members(self, obj):
+        collection = getattr(obj, "collection", None)
+        return [{"id": row.member_entity_id, "display_title": row.member_entity.display_title, "position": row.position}
+                for row in collection.items.select_related("member_entity")] if collection else []
 
 
 class CatalogEntityCreateSerializer(CleanModelSerializer):
@@ -86,7 +122,7 @@ class CatalogEntityCreateSerializer(CleanModelSerializer):
 
     class Meta:
         model = m.CatalogEntity
-        fields = ["entity_type", "display_title", "title_zh", "title_en", "aliases", "description", "extra_info", "cover_url", "cover_local_path", "detail_images", "independent_reading_suitable", "bookshelf_visible", "work", "volume_count", "lexile_min", "lexile_max"]
+        fields = ["entity_type", "display_title", "title_zh", "title_en", "aliases", "description", "extra_info", "guide_markdown", "fiction_type", "independent_reading_suitable", "bookshelf_visible", "work", "volume_count", "lexile_min", "lexile_max"]
 
     def validate(self, attrs):
         if attrs.get("work") is not None and attrs.get("entity_type") != "book":
@@ -107,6 +143,22 @@ class CatalogEntityBookshelfSerializer(serializers.Serializer):
     bookshelf_visible = serializers.BooleanField()
 
 
+class CatalogEntityEditSerializer(serializers.Serializer):
+    display_title = serializers.CharField(max_length=500, required=False)
+    title_zh = serializers.CharField(max_length=500, allow_blank=True, allow_null=True, required=False)
+    title_en = serializers.CharField(max_length=500, allow_blank=True, allow_null=True, required=False)
+    aliases = serializers.ListField(child=serializers.CharField(max_length=500), allow_null=True, required=False)
+    description = serializers.CharField(allow_blank=True, allow_null=True, required=False)
+    extra_info = serializers.CharField(allow_blank=True, allow_null=True, required=False)
+    guide_markdown = serializers.CharField(allow_blank=True, allow_null=True, required=False)
+    fiction_type = serializers.ChoiceField(choices=m.FICTION_TYPE_CHOICES, required=False)
+    independent_reading_suitable = serializers.BooleanField(allow_null=True, required=False)
+    bookshelf_visible = serializers.BooleanField(required=False)
+    work = WorkSerializer(required=False)
+    volume_count = serializers.IntegerField(min_value=0, allow_null=True, required=False)
+    category_decisions = serializers.ListField(child=serializers.DictField(), required=False)
+
+
 class CreatorSerializer(CleanModelSerializer):
     class Meta:
         model = m.ReadingListCreator
@@ -115,11 +167,12 @@ class CreatorSerializer(CleanModelSerializer):
 
 class ReadingListItemSerializer(CleanModelSerializer):
     catalog_entity_id = serializers.PrimaryKeyRelatedField(source="catalog_entity", queryset=m.CatalogEntity.objects.all())
+    recommended_edition_id = serializers.PrimaryKeyRelatedField(source="recommended_edition", queryset=m.BookEdition.objects.all(), allow_null=True, required=False)
     entity = CatalogEntitySerializer(source="catalog_entity", read_only=True)
 
     class Meta:
         model = m.ReadingListItem
-        fields = ["id", "catalog_entity_id", "position", "sub_position", "stage_label", "recommended_age_min_months", "recommended_age_max_months", "source_ar_text", "source_lexile_text", "source_level_text", "is_strong_recommendation", "recommendation_emphasis_text", "comment", "note", "entity"]
+        fields = ["id", "catalog_entity_id", "recommended_edition_id", "position", "sub_position", "stage_label", "recommended_age_min_months", "recommended_age_max_months", "source_ar_text", "source_lexile_text", "source_level_text", "is_strong_recommendation", "recommendation_emphasis_text", "comment", "note", "entity"]
 
 
 class ReadingListSerializer(CleanModelSerializer):

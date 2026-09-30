@@ -1,6 +1,14 @@
 const API_BASE = "/api";
 let csrfToken = "";
 
+export function catalogAssetUrl(path?: string | null): string {
+  if (!path) return "";
+  if (path.startsWith("research_data/")) {
+    return `${API_BASE}/catalog-assets/${path.slice("research_data/".length).split("/").map(encodeURIComponent).join("/")}`;
+  }
+  return path;
+}
+
 export async function refreshCsrf() {
   const response = await fetch(`${API_BASE}/auth/csrf`, { credentials: "same-origin" });
   if (!response.ok) throw new Error("无法建立安全会话，请刷新重试。");
@@ -33,7 +41,22 @@ function json(method: string, body: unknown): RequestInit {
   return { method, headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) };
 }
 
-export type EntityType = "book" | "animation" | "reading_system" | "series" | "level" | "set";
+export type EntityType = "book" | "animation" | "reading_system" | "series" | "level" | "set" | "franchise";
+
+export type BookEdition = {
+  id: number; work_id: number; cover_local_path?: string | null; publisher?: string | null;
+  format?: string | null; page_count?: number | null; publication_date?: string | null;
+  dimensions?: string | null; isbns: Array<{ id: number; isbn_type: number; isbn_val: string }>;
+};
+
+export type CatalogCaptureCandidate = {
+  token: string;
+  values: Record<string, unknown>;
+  current: Record<string, unknown>;
+  source_url?: string | null;
+  matched_edition_id?: number | null;
+  draft?: string;
+};
 
 export type CatalogCategory = {
   id: number;
@@ -44,6 +67,7 @@ export type CatalogCategory = {
   name_en?: string | null;
   description?: string | null;
   sort_order?: number | null;
+  is_primary?: boolean;
 };
 
 export type CatalogEntity = {
@@ -55,9 +79,9 @@ export type CatalogEntity = {
   aliases?: string[] | null;
   description?: string | null;
   extra_info?: string | null;
+  guide_markdown?: string | null;
+  fiction_type: "unknown" | "fiction" | "nonfiction" | "mixed";
   cover_url?: string | null;
-  cover_local_path?: string | null;
-  detail_images?: Array<{ source_url: string; local_path?: string | null }> | null;
   independent_reading_suitable?: boolean | null;
   bookshelf_visible: boolean;
   volume_count?: number | null;
@@ -66,16 +90,22 @@ export type CatalogEntity = {
   work?: {
     author_text?: string | null;
     illustrator_text?: string | null;
+    translator_text?: string | null;
     language_code?: string | null;
+    detail_images?: string[] | null;
+    /** Legacy compatibility for existing product UI; new data uses editions. */
     page_count?: number | null;
     word_count?: number | null;
     headword_count?: number | null;
     ar_level?: number | null;
     lexile_code?: string | null;
   } | null;
+  editions: BookEdition[];
   isbns: Array<{ id: number; isbn_type: number; isbn_val: string }>;
   categories: CatalogCategory[];
   reading_pens: Array<{ id: number; name: string }>;
+  parents: Array<{ id: number; display_title: string; position?: number | null }>;
+  members: Array<{ id: number; display_title: string; position?: number | null }>;
 };
 
 export type CatalogTreeNode = {
@@ -110,6 +140,7 @@ export type ReadingList = {
 export type ReadingListItem = {
   id: number;
   entity: CatalogEntity;
+  recommended_edition_id?: number | null;
   position?: number | null;
   stage_label?: string | null;
   recommended_age_min_months?: number | null;
@@ -249,12 +280,13 @@ export type ResearchSubject = {
   proposed_aliases?: string[] | null;
   facts_json?: Record<string, unknown> | null;
   ai_inferences_json?: Record<string, unknown> | null;
+  guide_markdown_draft?: string | null;
   research_status: string;
   manual_note?: string | null;
   resolution_status: string;
   resolved_catalog_entity_id?: number | null;
   resolved_bookshelf_visible?: boolean | null;
-  sources: Array<{ id: number; source_type?: string | null; source_url: string; source_title?: string | null; fetched_at?: string | null }>;
+  sources: Array<{ id: number; source_type?: string | null; source_url: string; source_title?: string | null; fetched_at?: string | null; raw_content?: string | null }>;
   candidates: ResearchCandidate[];
   relations: ResearchRelation[];
   pending_conflict_count: number;
@@ -276,6 +308,7 @@ export type ReviewItem = {
   lock_version: number;
   resolved_at?: string | null;
   subjects: ResearchSubject[];
+  edition_drafts: Array<{ id: number; book_subject_id?: number | null; matched_catalog_edition_id?: number | null; proposed_data: Record<string, unknown>; review_status: string; source_id?: number | null }>;
 };
 
 export type BrowserSessionStatus = {
@@ -300,6 +333,17 @@ export const api = {
   entity: (id: number) => request<CatalogEntity>(`/catalog/entities/${id}`),
   updateEntityBookshelf: (id: number, bookshelfVisible: boolean) =>
     request<CatalogEntity>(`/catalog/entities/${id}`, json("PATCH", { bookshelf_visible: bookshelfVisible })),
+  updateEntity: (id: number, payload: Record<string, unknown>) => request<CatalogEntity>(`/catalog/entities/${id}`, json("PATCH", payload)),
+  createEdition: (id: number, payload: Record<string, unknown>) => request<BookEdition>(`/catalog/entities/${id}/editions`, json("POST", payload)),
+  updateEdition: (id: number, editionId: number, payload: Record<string, unknown>) => request<BookEdition>(`/catalog/entities/${id}/editions/${editionId}`, json("PATCH", payload)),
+  addEditionIsbn: (id: number, editionId: number, isbn: string) => request<CatalogEntity>(`/catalog/entities/${id}/isbns`, json("POST", { edition_id: editionId, isbn })),
+  addCollectionMember: (id: number, memberId: number, position?: number | null) => request<CatalogTreeNode>(`/collections/${id}/items`, json("POST", { member_entity_id: memberId, position })),
+  removeCollectionMember: (id: number, memberId: number) => request<void>(`/collections/${id}/items`, json("DELETE", { member_entity_id: memberId })),
+  adminSearch: (id: number, provider: "amazon" | "jd" | "official", query?: string) => request<Record<string, unknown>>(`/catalog/entities/${id}/admin-search`, json("POST", { provider, query })),
+  adminCapture: (id: number, provider: "amazon" | "jd" | "official", scope: "page" | "edition" | "structure") => request<CatalogCaptureCandidate>(`/catalog/entities/${id}/admin-capture`, json("POST", { provider, scope })),
+  adminConfirm: (id: number, candidate: CatalogCaptureCandidate, selectedFields: string[], editionId?: number | null, members?: Array<Record<string, unknown>>, guideMarkdown?: string) =>
+    request<CatalogEntity>(`/catalog/entities/${id}/admin-confirm`, json("POST", { token: candidate.token, selected_fields: selectedFields, edition_id: editionId, members, guide_markdown: guideMarkdown })),
+  adminGuideMaterial: (id: number, rawContent: string, sourceTitle = "") => request<CatalogCaptureCandidate>(`/catalog/entities/${id}/guide-material`, json("POST", { raw_content: rawContent, source_title: sourceTitle })),
   collection: (id: number) => request<CatalogTreeNode>(`/collections/${id}`),
   categories: () => request<CatalogCategory[]>("/categories"),
   databaseTables: () => request<{ vendor: string; tables: DatabaseTable[] }>("/database/tables"),
@@ -364,14 +408,25 @@ export const api = {
       capture: { source_url?: string | null; title?: string | null; fact_count: number };
       item: ReviewItem;
     }>(`/review/items/${itemId}/official-capture`, json("POST", {})),
+  captureEdition: (itemId: number, provider: "amazon" | "jd" | "official", subjectId?: number) =>
+    request<{ item: ReviewItem; edition_draft_id: number }>(`/review/items/${itemId}/capture-edition`, json("POST", { provider, subject_id: subjectId })),
+  captureStructure: (itemId: number, provider: "amazon" | "jd" | "official", subjectId?: number) =>
+    request<{ item: ReviewItem; relation_ids: number[] }>(`/review/items/${itemId}/capture-structure`, json("POST", { provider, subject_id: subjectId })),
+  decideEditionDraft: (itemId: number, draftId: number, payload: { review_status: "confirmed" | "rejected"; matched_catalog_edition_id?: number | null; proposed_data?: Record<string, unknown> }) =>
+    request<ReviewItem>(`/review/items/${itemId}/edition-drafts/${draftId}`, json("PATCH", payload)),
+  addGuideMaterial: (itemId: number, subjectId: number, rawContent: string, sourceTitle = "") =>
+    request<ReviewItem>(`/review/items/${itemId}/subjects/${subjectId}/guide-material`, json("POST", { raw_content: rawContent, source_title: sourceTitle })),
+  saveGuideDraft: (itemId: number, subjectId: number, markdown: string) =>
+    request<ReviewItem>(`/review/items/${itemId}/subjects/${subjectId}/guide-draft`, json("PUT", { guide_markdown_draft: markdown })),
   researchSelectedStructure: (itemId: number, memberSubjectIds: number[]) =>
     request<{ item: ReviewItem; captured_subject_ids: number[]; capture_errors: Record<string, string> }>(`/review/items/${itemId}/structure-research`, json("POST", { member_subject_ids: memberSubjectIds })),
   createParentStructure: (itemId: number, payload: {
     child_subject_id: number;
-    proposed_entity_type: "reading_system" | "series" | "level" | "set";
+    proposed_entity_type: "reading_system" | "series" | "level" | "set" | "franchise";
     proposed_display_title: string;
     proposed_title_zh?: string | null;
     proposed_title_en?: string | null;
+    category_ids?: number[];
   }) => request<{ parent_subject_id: number; relation_id: number; item: ReviewItem }>(`/review/items/${itemId}/parents`, json("POST", payload)),
   researchParentHierarchy: (itemId: number) =>
     request<{ subject_ids: number[]; relation_ids: number[]; item: ReviewItem }>(`/review/items/${itemId}/parent-research`, json("POST", {})),
@@ -418,7 +473,10 @@ export const api = {
     include_structure_subject_ids?: number[];
     structure_decisions?: Array<{ subject_id: number; decision: "match_existing" | "create_new"; catalog_entity_id?: number }>;
     category_decisions?: Array<{ category_id: number; is_primary: boolean }>;
+    structure_category_decisions?: Array<{ subject_id: number; category_ids: number[] }>;
     bookshelf_visibility?: Array<{ subject_id: number; visible: boolean }>;
+    recommended_edition_id?: number | null;
+    recommended_edition_draft_id?: number | null;
   }) => request<ReviewItem>(`/review/items/${itemId}/decision`, json("POST", payload)),
   bulkMatch: (entries: Array<{ review_item_id: number; catalog_entity_id: number; expected_version: number }>) =>
     request<{ resolved_item_ids: number[] }>("/review/items/bulk-match", json("POST", { entries }))

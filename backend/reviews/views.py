@@ -6,7 +6,7 @@ from rest_framework.permissions import IsAdminUser
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from .models import ResearchSubject, ReviewBatch, ReviewDataConflict, ReviewItem
+from .models import ResearchSubject, ReviewBatch, ReviewDataConflict, ReviewEditionDraft, ReviewItem
 from .amazon_assist import AmazonAssistError, amazon_browser_status, capture_amazon_product, open_amazon_search
 from .jd_assist import JdAssistError, capture_jd_product, jd_browser_status, open_jd_search
 from .official_assist import (
@@ -14,7 +14,8 @@ from .official_assist import (
     official_browser_status, open_official_search,
 )
 from .serializers import (
-    BulkMatchSerializer, ConflictResolveSerializer, ResearchRelationSerializer, ResearchSubjectDraftSerializer, ResearchSubjectSerializer,
+    BulkMatchSerializer, ConflictResolveSerializer, EditionDraftDecisionSerializer, GuideDraftSerializer, GuideMaterialSerializer,
+    ResearchRelationSerializer, ResearchSubjectDraftSerializer, ResearchSubjectSerializer,
     ParentStructureCreateSerializer, ProductImageSelectionSerializer, ReviewBatchImportSerializer, ReviewBatchSerializer,
     ReviewDataConflictSerializer, ReviewDecisionSerializer, ReviewItemSourceCopySerializer,
     SelectedStructureResearchSerializer,
@@ -24,7 +25,8 @@ from .services import (
     create_research_subject, import_source_file, refresh_catalog_candidates, resolve_conflict,
     aggregate_selected_member_lexiles, apply_amazon_capture, apply_jd_capture, apply_official_capture, resolve_review_item, review_item_to_dict, review_write_transaction, subject_to_dict,
     update_product_image_selection, update_research_subject, update_review_subject_draft, read_batch_source, stage_parent_structure,
-    stage_detected_parent_hierarchy, summarize_description_classification, update_review_item_source_copy,
+    stage_detected_parent_hierarchy, stage_edition_capture, stage_structure_capture, stage_guide_material,
+    summarize_description_classification, update_review_item_source_copy,
 )
 
 
@@ -252,6 +254,83 @@ class ItemOfficialCapture(ReviewAPI):
             },
             "item": review_item_to_dict(item),
         })
+
+
+def _capture_selected_page(subject, provider):
+    title, alternate_titles = _subject_search_values(subject)
+    try:
+        if provider == "amazon":
+            return capture_amazon_product(title)
+        if provider == "jd":
+            return capture_jd_product(title, alternate_titles)
+        if provider == "official":
+            return capture_current_official(subject, title, alternate_titles)
+    except (AmazonAssistError, JdAssistError, OfficialAssistError) as error:
+        raise ReviewDomainError(str(error)) from error
+    raise ReviewDomainError("provider 必须是 amazon、jd 或 official")
+
+
+class ItemScopedCapture(ReviewAPI):
+    def post(self, request, item_id, scope):
+        if scope not in {"edition", "structure"}:
+            raise ReviewDomainError("Unknown capture scope")
+        provider = request.data.get("provider")
+        item = get_object_or_404(ReviewItem, pk=item_id)
+        subject_id = request.data.get("subject_id")
+        subject = get_object_or_404(ResearchSubject, pk=subject_id) if subject_id else _primary_subject(item_id)
+        capture = _capture_selected_page(subject, provider)
+        with review_write_transaction():
+            item = get_object_or_404(ReviewItem.objects.select_for_update(), pk=item_id)
+            subject = get_object_or_404(ResearchSubject.objects.select_for_update(), pk=subject.pk)
+            if scope == "edition":
+                draft = stage_edition_capture(item, subject, capture, provider)
+                result = {"edition_draft_id": draft.pk}
+            else:
+                result = {"relation_ids": stage_structure_capture(item, subject, capture, provider, self.actor())}
+        item.refresh_from_db()
+        return Response({**result, "item": review_item_to_dict(item)})
+
+
+class ItemEditionDraft(ReviewAPI):
+    def patch(self, request, item_id, draft_id):
+        values = self.validated(EditionDraftDecisionSerializer)
+        with review_write_transaction():
+            draft = get_object_or_404(ReviewEditionDraft.objects.select_for_update(), pk=draft_id, review_item_id=item_id)
+            if draft.review_item.status in {"resolved", "ignored"}:
+                raise ReviewDomainError("Cannot change an Edition after Review commit")
+            matched_id = values.get("matched_catalog_edition_id")
+            if matched_id is not None:
+                from catalog.models import BookEdition
+                draft.matched_catalog_edition = get_object_or_404(BookEdition, pk=matched_id)
+            if "proposed_data" in values:
+                draft.proposed_data = {**draft.proposed_data, **values["proposed_data"]}
+            draft.review_status = values["review_status"]
+            draft.save()
+        return Response(review_item_to_dict(draft.review_item))
+
+
+class SubjectGuideMaterial(ReviewAPI):
+    def post(self, request, item_id, subject_id):
+        values = self.validated(GuideMaterialSerializer)
+        with review_write_transaction():
+            item = get_object_or_404(ReviewItem.objects.select_for_update(), pk=item_id)
+            subject = get_object_or_404(ResearchSubject.objects.select_for_update(), pk=subject_id)
+            stage_guide_material(item, subject, **values)
+        item.refresh_from_db()
+        return Response(review_item_to_dict(item))
+
+
+class SubjectGuideDraft(ReviewAPI):
+    def put(self, request, item_id, subject_id):
+        values = self.validated(GuideDraftSerializer)
+        with review_write_transaction():
+            item = get_object_or_404(ReviewItem.objects.select_for_update(), pk=item_id)
+            subject = get_object_or_404(ResearchSubject.objects.select_for_update(), pk=subject_id)
+            if item.status in {"resolved", "ignored"} or not item.subject_links.filter(research_subject=subject).exists():
+                raise ReviewDomainError("Guide Draft is not editable for this review item")
+            subject.guide_markdown_draft = values["guide_markdown_draft"]
+            subject.save(update_fields=["guide_markdown_draft", "updated_at"])
+        return Response(review_item_to_dict(item))
 
 
 class ItemStructureResearch(ReviewAPI):

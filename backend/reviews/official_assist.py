@@ -25,6 +25,7 @@ from .amazon_assist import (
     _normalize_search_query,
     _wait_for_browser,
 )
+from .browser_session import capture_tabs, remember_search
 
 
 class OfficialAssistError(RuntimeError):
@@ -66,7 +67,7 @@ def _current_official_page(expected_titles):
         pages = _devtools_json("/json")
     except Exception as error:
         raise OfficialAssistError("无法读取官网辅助浏览器。") from error
-    for page in pages:
+    for page in capture_tabs("official", pages):
         if _is_official_candidate_page(page, expected_titles):
             return page
     raise OfficialAssistError("没有找到与当前审核项匹配的官网页面；请先从 Google 结果打开出版社或作者官网。")
@@ -124,6 +125,10 @@ def open_official_search(query: str) -> dict:
                 time.sleep(0.25)
             if not page:
                 raise OfficialAssistError("搜索页未出现在官网采集浏览器中；请重试。此次未启动自动采集。")
+            try:
+                remember_search("official", page, _devtools_json("/json"))
+            except Exception:
+                pass
         except OfficialAssistError:
             raise
         except Exception as error:
@@ -156,7 +161,7 @@ def official_browser_status(expected_query: str = "", alternate_titles=None) -> 
                 "provider": "official", "connected": True, "state": "official_detail",
                 "current_url": page.get("url", ""), "product_title": page.get("title", "").strip(),
                 "product_id": "", "capture_ready": True,
-                "message": "已识别官网页面，正在自动采集",
+                "message": "已识别官网页面，可点击 Capture 采集",
             }
         return {
             "provider": "official", "connected": True, "state": "search_results",
@@ -448,7 +453,7 @@ def _official_capture_from_driver(driver, subject, source_url: str, source_type:
         ),
     }
     boxes = driver.find_elements(By.CSS_SELECTOR, ".bookDetails")
-    if subject.proposed_entity_type in {"reading_system", "series", "level", "set"} and len(boxes) >= 2:
+    if subject.proposed_entity_type in {"reading_system", "series", "level", "set", "franchise"} and len(boxes) >= 2:
         members = []
         for position, box in enumerate(boxes, 1):
             title_elements = box.find_elements(By.CSS_SELECTOR, ".bookDetails__title")

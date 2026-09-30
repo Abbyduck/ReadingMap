@@ -59,6 +59,7 @@ class ResearchSubject(Timestamped):
     proposed_aliases = models.JSONField(null=True, blank=True)
     research_fingerprint = models.CharField(max_length=64, null=True, blank=True, db_index=True)
     facts_json = models.JSONField(null=True, blank=True)
+    guide_markdown_draft = models.TextField(null=True, blank=True)
     ai_inferences_json = models.JSONField(null=True, blank=True)
     research_status = models.CharField(max_length=30, default="pending")
     resolution_status = models.CharField(max_length=30, default="unresolved")
@@ -88,6 +89,7 @@ class ResearchSource(models.Model):
     source_type = models.CharField(max_length=50, null=True, blank=True)
     source_url = models.CharField(max_length=1500)
     source_title = models.CharField(max_length=1000, null=True, blank=True)
+    raw_content = models.TextField(null=True, blank=True)
     fetched_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
@@ -146,6 +148,18 @@ class ReviewDataConflict(Timestamped):
 
     class Meta:
         db_table = "review_data_conflicts"
+
+
+class ReviewEditionDraft(Timestamped):
+    review_item = models.ForeignKey(ReviewItem, related_name="edition_drafts", on_delete=models.CASCADE)
+    book_subject = models.ForeignKey(ResearchSubject, null=True, blank=True, on_delete=models.SET_NULL)
+    matched_catalog_edition = models.ForeignKey("catalog.BookEdition", null=True, blank=True, on_delete=models.SET_NULL)
+    proposed_data = models.JSONField(default=dict)
+    review_status = models.CharField(max_length=30, default="proposed")
+    source = models.ForeignKey(ResearchSource, null=True, blank=True, on_delete=models.SET_NULL)
+
+    class Meta:
+        db_table = "review_edition_drafts"
 
 
 class ReviewActionLog(models.Model):

@@ -14,6 +14,8 @@ from urllib.request import Request, urlopen
 
 from django.conf import settings
 
+from .browser_session import capture_tabs, remember_search
+
 
 class AmazonAssistError(RuntimeError):
     pass
@@ -155,7 +157,7 @@ def _current_product_page():
         pages = _devtools_json("/json")
     except Exception as error:
         raise AmazonAssistError("无法读取 Amazon 辅助浏览器。") from error
-    for page in pages:
+    for page in capture_tabs("amazon", pages):
         if page.get("type") == "page" and _asin_from_url(page.get("url", "")):
             return page
     raise AmazonAssistError("没有找到 Amazon 商品详情页；请先在搜索结果中打开正确商品。")
@@ -190,7 +192,7 @@ def amazon_browser_status(expected_query: str = "") -> dict:
             }
 
         provider_pages = [
-            page for page in pages
+            page for page in capture_tabs("amazon", pages)
             if page.get("type") == "page" and "amazon." in urlsplit(page.get("url", "")).netloc.casefold()
         ]
         product_page = next((page for page in provider_pages if _asin_from_url(page.get("url", ""))), None)
@@ -613,6 +615,10 @@ def open_amazon_search(query: str) -> dict:
             raise AmazonAssistError("Chrome 已打开，但没有找到对应的 Amazon 搜索标签页。")
         if page.get("title", "").strip().lower().startswith("sorry"):
             raise AmazonAssistError("Amazon 返回了错误页；请在辅助 Chrome 中刷新后重试。")
+        try:
+            remember_search("amazon", page, _devtools_json("/json"))
+        except Exception:
+            pass
     return {
         "query": normalized,
         "search_url": search_url,

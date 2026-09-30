@@ -8,12 +8,12 @@ from django.test import TestCase, override_settings
 from django.contrib.auth import get_user_model
 from rest_framework.test import APIClient
 
-from catalog.models import CatalogCategory, CatalogEntity, CatalogEntityCategory, CollectionItem, ReadingList, ReadingListCreator, ReadingListItem
+from catalog.models import BookEdition, CatalogCategory, CatalogEntity, CatalogEntityCategory, CollectionItem, ReadingList, ReadingListCreator, ReadingListItem
 from research_worker import apply_manifest, prepare, queue, restore_creators, verify
-from .models import ResearchSubject, ReviewBatch, ReviewDataConflict, ReviewItem
+from .models import ResearchSource, ResearchSubject, ReviewBatch, ReviewDataConflict, ReviewItem
 from .services import (
     ReviewDomainError, StaleReviewError, aggregate_selected_member_lexiles, apply_amazon_capture, apply_jd_capture, apply_official_capture, create_research_relation, create_research_subject,
-    extract_review_payload, resolve_review_item, review_item_to_dict, review_write_transaction, stage_detected_parent_hierarchy, summarize_description_classification, update_product_image_selection, update_research_subject,
+    extract_review_payload, resolve_review_item, review_item_to_dict, review_write_transaction, stage_detected_parent_hierarchy, stage_edition_capture, stage_guide_material, stage_parent_structure, stage_structure_capture, summarize_description_classification, update_product_image_selection, update_research_subject,
 )
 from .amazon_assist import AmazonAssistError, _assert_product_matches, _member_titles_from_product_title, _normalize_search_query
 from .jd_assist import (
@@ -21,8 +21,18 @@ from .jd_assist import (
     _gallery_image_urls, _included_titles_from_text, _jd_sku_from_url, _normalize_jd_query,
 )
 from .official_assist import OfficialAssistError, _is_official_candidate_page, _simon_schuster_cover_url, infer_official_entity_type, open_official_search
+from .browser_session import capture_tabs, remember_search
 
 SOURCE = "reading_lists/香蕉妈妈__065__2026年香蕉妈妈牛1-高章泛听泛读书单-小红书.json"
+
+
+class BrowserSessionScopeTests(TestCase):
+    def test_capture_prefers_current_search_tab_and_new_child(self):
+        previous = {"id": "old-product", "url": "https://example.com/stale"}
+        search = {"id": "search", "url": "https://example.com/search"}
+        remember_search("scope-test", search, [previous, search])
+        child = {"id": "child", "openerId": "search", "url": "https://example.com/current"}
+        self.assertEqual(capture_tabs("scope-test", [previous, child, search]), [child, search])
 
 
 class OfficialSearchTests(TestCase):
@@ -702,11 +712,11 @@ class ResearchReviewTests(TestCase):
 
         stale = client.put(f"/api/review/items/{self.item.pk}/subjects/{self.subject.pk}/draft", {
             "expected_version": self.item.lock_version - 1,
-            "fact_values": {"publisher": "Stale publisher"},
+            "fact_values": {"translator": "Stale translator"},
         }, format="json")
         self.assertEqual(stale.status_code, 409, stale.data)
         self.subject.refresh_from_db()
-        self.assertNotIn("publisher", self.subject.facts_json)
+        self.assertNotIn("translator", self.subject.facts_json)
 
     @patch("reviews.views.open_amazon_search")
     def test_amazon_search_uses_saved_primary_title(self, open_search):
@@ -757,7 +767,7 @@ class ResearchReviewTests(TestCase):
         self.assertEqual(response.status_code, 200, response.data)
         self.subject.refresh_from_db()
         self.assertEqual(self.subject.facts_json["description"]["value"], "Official synopsis")
-        self.assertEqual(self.subject.facts_json["publisher"]["value"], "Candlewick")
+        self.assertNotIn("publisher", self.subject.facts_json)
         log = self.item.action_logs.get(action="official_source_captured")
         self.assertEqual(log.details_json["captured_facts"]["description"], "Official synopsis")
 
@@ -900,17 +910,13 @@ David Milgrim"""
         self.item.refresh_from_db()
         source = self.subject.source_links.get().research_source
         self.assertEqual(source.source_type, "amazon_product")
-        self.assertEqual(self.subject.facts_json["isbns"]["value"], ["9780763680862"])
-        self.assertEqual(self.subject.facts_json["isbns"]["source_ids"], [source.pk])
+        self.assertNotIn("isbns", self.subject.facts_json)
         self.assertNotIn("amazon_title", self.subject.facts_json)
         self.assertNotIn("asin", self.subject.facts_json)
         self.assertEqual(len(self.subject.facts_json["product_images"]["value"]), 3)
         self.assertEqual(self.subject.research_status, "partial")
         self.assertEqual(self.item.status, "ready")
-        self.assertEqual(
-            list(self.subject.member_relations.order_by("position").values_list("member_subject__proposed_display_title", flat=True)),
-            ["See Otto", "See Pip Point"],
-        )
+        self.assertFalse(self.subject.member_relations.exists())
         self.assertEqual(CatalogEntity.objects.count(), 0)
         self.assertEqual(ReadingListItem.objects.count(), 0)
 
@@ -928,22 +934,16 @@ David Milgrim"""
         self.assertEqual(self.subject.facts_json["cover"]["value"], images[1]["source_url"])
         self.assertEqual(
             self.subject.facts_json["detail_images"]["value"],
-            [
-                {"source_url": images[0]["source_url"], "local_path": images[0]["local_path"]},
-                {"source_url": images[1]["source_url"], "local_path": images[1]["local_path"]},
-            ],
+            [{"source_url": images[0]["source_url"], "local_path": images[0]["local_path"]}],
         )
 
         self.decide()
         entity = CatalogEntity.objects.get()
         self.assertEqual(entity.entity_type, "set")
         self.assertEqual(entity.extra_info, "Amazon 评分：4.8 / 5\n商品尺寸：10 x 8 in")
-        self.assertEqual(entity.cover_url, images[1]["source_url"])
-        self.assertEqual(entity.cover_local_path, images[1]["local_path"])
-        self.assertEqual(entity.detail_images, [
-            {"source_url": images[0]["source_url"], "local_path": images[0]["local_path"]},
-            {"source_url": images[1]["source_url"], "local_path": images[1]["local_path"]},
-        ])
+        self.assertIsNone(entity.cover_url)
+        self.assertIsNone(entity.cover_local_path)
+        self.assertIsNone(entity.detail_images)
         self.assertEqual(ReadingListItem.objects.count(), 1)
         self.assertEqual(ReadingListItem.objects.get().catalog_entity_id, entity.pk)
 
@@ -968,8 +968,8 @@ David Milgrim"""
         self.subject.refresh_from_db()
         sources = {link.research_source.source_type for link in self.subject.source_links.select_related("research_source")}
         self.assertEqual(sources, {"amazon_product", "jd_product"})
-        self.assertEqual(self.subject.facts_json["publisher"]["value"], "Candlewick")
-        self.assertEqual(self.subject.facts_json["jd_publisher"]["value"], "某国内出版社")
+        self.assertNotIn("publisher", self.subject.facts_json)
+        self.assertNotIn("jd_publisher", self.subject.facts_json)
         self.assertEqual(self.subject.facts_json["reading_age"]["value"], "3-6岁")
         self.assertEqual(self.subject.facts_json["retailer_category"]["value"], "Picture Books(绘本)")
         material_types = self.subject.ai_inferences_json["classification"]["material_type"]
@@ -999,7 +999,7 @@ David Milgrim"""
         self.subject.refresh_from_db()
         source = self.subject.source_links.get(research_source__source_url="https://publisher.example/9781481499842").research_source
         self.assertEqual(source.source_type, "publisher_official")
-        self.assertIn(source.pk, self.subject.facts_json["publisher"]["source_ids"])
+        self.assertEqual(self.subject.facts_json["publisher"]["value"], "Simon Spotlight")
         self.assertEqual(self.subject.facts_json["official_age"]["value"], "3 - 5")
         self.assertEqual(self.subject.facts_json["official_reading_age"]["value"], "3 - 5")
         self.assertIsNone(self.subject.resolved_catalog_entity_id)
@@ -1032,7 +1032,7 @@ David Milgrim"""
         self.subject.proposed_entity_type = "set"
         self.subject.proposed_display_title = "Official boxed set"
         self.subject.save(update_fields=["proposed_entity_type", "proposed_display_title"])
-        apply_official_capture(self.subject, {
+        stage_structure_capture(self.item, self.subject, {
             "source_url": "https://publisher.example/boxed-set",
             "source_title": "Official boxed set",
             "facts": {"language": "English"},
@@ -1047,18 +1047,15 @@ David Milgrim"""
                     "lexile": "120L",
                 },
             }],
-        })
+        }, "official")
         relation = self.subject.member_relations.select_related("member_subject").get()
         member = relation.member_subject
         self.assertEqual(relation.evidence_type, "source_fact")
         self.assertEqual(relation.review_status, "confirmed")
         self.assertEqual(float(relation.confidence), 1.0)
-        self.assertEqual(member.facts_json["cover"]["value"], "https://publisher.example/member-one.jpg")
-        self.assertEqual(member.facts_json["lexile"]["value"], "120L")
-        self.assertEqual(member.facts_json["language"]["value"], "en")
-        self.assertEqual(member.facts_json["language"]["inherited_from_subject_id"], self.subject.pk)
+        self.assertFalse(member.facts_json)
         self.subject.refresh_from_db()
-        self.assertEqual(self.subject.facts_json["language"]["value"], "en")
+        self.assertFalse(self.subject.facts_json)
         self.assertTrue(self.item.subject_links.filter(research_subject=member, subject_role="discovered_member").exists())
         self.assertEqual(CatalogEntity.objects.count(), 0)
 
@@ -1120,3 +1117,96 @@ David Milgrim"""
         self.batch.save(update_fields=["source_file_path"])
         self.assertEqual(client.get(url).status_code, 400)
         self.assertEqual(CatalogEntity.objects.count(), 0)
+
+    def test_commit_without_research_structure_or_classification(self):
+        self.assertEqual(self.item.status, "pending")
+        self.subject.proposed_entity_type = "book"
+        self.subject.save(update_fields=["proposed_entity_type"])
+        self.decide()
+        self.item.refresh_from_db()
+        entity = CatalogEntity.objects.get(pk=self.item.resolved_catalog_entity_id)
+        self.assertEqual(entity.entity_type, "book")
+        self.assertTrue(hasattr(entity, "work"))
+        self.assertEqual(ReadingListItem.objects.get().catalog_entity_id, entity.pk)
+
+    def test_edition_capture_keeps_work_draft_and_merges_cover_choices(self):
+        self.subject.proposed_entity_type = "book"
+        self.subject.facts_json = {"author": {"value": "Human author", "source_ids": []}}
+        self.subject.save(update_fields=["proposed_entity_type", "facts_json"])
+        capture = {
+            "source_url": "https://www.amazon.com/dp/0763680869",
+            "facts": {
+                "author": "Captured author", "page_count": 42, "isbns": ["9780763680862"],
+                "product_images": [{"role": "cover", "source_url": "https://example.com/a.jpg", "local_path": "/media/a.jpg"}],
+            },
+        }
+        with review_write_transaction():
+            first = stage_edition_capture(self.item, self.subject, capture, "amazon")
+            capture["facts"]["product_images"] = [{"role": "cover", "source_url": "https://example.com/b.jpg", "local_path": "/media/b.jpg"}]
+            capture["facts"]["isbns"] = ["0763680869"]
+            second = stage_edition_capture(self.item, self.subject, capture, "amazon")
+        self.assertEqual(first.pk, second.pk)
+        second.refresh_from_db()
+        self.subject.refresh_from_db()
+        self.assertEqual(len(second.proposed_data["cover_choices"]), 2)
+        self.assertEqual(second.proposed_data["page_count"], 42)
+        self.assertEqual(self.subject.facts_json["author"]["value"], "Human author")
+        self.assertFalse(ReviewDataConflict.objects.exists())
+        self.assertEqual(BookEdition.objects.count(), 0)
+        second.review_status = "confirmed"
+        second.save(update_fields=["review_status"])
+        self.decide(recommended_edition_draft_id=second.pk)
+        edition = BookEdition.objects.get()
+        self.assertEqual(edition.page_count, 42)
+        self.assertEqual(set(edition.isbns.values_list("isbn_val", flat=True)), {"9780763680862", "0763680869"})
+        self.assertEqual(ReadingListItem.objects.get().recommended_edition_id, edition.pk)
+
+    def test_structure_capture_repeats_without_work_or_edition_changes(self):
+        self.subject.proposed_entity_type = "set"
+        self.subject.save(update_fields=["proposed_entity_type"])
+        capture = {
+            "source_url": "https://item.jd.com/123.html",
+            "facts": {"included_titles": ["First book", "Second book"], "author": "Unrelated"},
+        }
+        with review_write_transaction():
+            first = stage_structure_capture(self.item, self.subject, capture, "jd")
+            second = stage_structure_capture(self.item, self.subject, capture, "jd")
+        self.assertEqual(first, second)
+        self.assertEqual(self.subject.member_relations.count(), 2)
+        self.subject.refresh_from_db()
+        self.assertFalse(self.subject.facts_json)
+        self.assertFalse(self.subject.ai_inferences_json)
+        self.assertEqual(self.item.edition_drafts.count(), 0)
+
+    def test_guide_material_is_retained_and_committed_only_after_review(self):
+        self.subject.proposed_entity_type = "book"
+        self.subject.save(update_fields=["proposed_entity_type"])
+        with review_write_transaction():
+            source = stage_guide_material(self.item, self.subject, "第一段\n第二段", "个人笔记")
+        self.assertEqual(source.raw_content, "第一段\n第二段")
+        self.assertEqual(source.source_type, "manual_guide")
+        self.subject.refresh_from_db()
+        self.assertEqual(self.subject.guide_markdown_draft, "第一段\n\n第二段")
+        self.assertEqual(CatalogEntity.objects.count(), 0)
+        self.subject.guide_markdown_draft = "## 人工整理\n适合共读。"
+        self.subject.save(update_fields=["guide_markdown_draft"])
+        self.decide()
+        self.assertEqual(CatalogEntity.objects.get().guide_markdown, "## 人工整理\n适合共读。")
+        self.assertTrue(ResearchSource.objects.filter(pk=source.pk, raw_content="第一段\n第二段").exists())
+
+    def test_series_classification_is_copied_once_from_book_draft(self):
+        classification = {"theme": [{"code": "friendship", "confidence": 0.8}]}
+        self.subject.proposed_entity_type = "book"
+        self.subject.ai_inferences_json = {"classification": classification}
+        self.subject.save(update_fields=["proposed_entity_type", "ai_inferences_json"])
+        with review_write_transaction():
+            series, _ = stage_parent_structure(self.item, {
+                "child_subject_id": self.subject.pk,
+                "proposed_entity_type": "series", "proposed_display_title": "A series",
+                "category_ids": [],
+            })
+        self.assertEqual(series.ai_inferences_json["classification"], classification)
+        self.subject.ai_inferences_json = {"classification": {"topic": [{"code": "animals"}]}}
+        self.subject.save(update_fields=["ai_inferences_json"])
+        series.refresh_from_db()
+        self.assertEqual(series.ai_inferences_json["classification"], classification)

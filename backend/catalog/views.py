@@ -1,11 +1,17 @@
+from pathlib import Path
+
+from django.conf import settings
 from django.db import transaction
 from django.db.models import Prefetch
+from django.http import FileResponse, Http404
 from django.shortcuts import get_object_or_404
 from rest_framework import permissions, serializers, status
+from rest_framework.exceptions import APIException
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from . import models as m, serializers as s, services
+from . import admin_capture
 
 
 class PublicReadStaffWrite(permissions.BasePermission):
@@ -15,6 +21,19 @@ class PublicReadStaffWrite(permissions.BasePermission):
 
 class PublicCatalogView(APIView):
     permission_classes = [PublicReadStaffWrite]
+
+
+class CatalogAssetView(APIView):
+    permission_classes = [permissions.IsAdminUser]
+
+    def get(self, request, asset_path):
+        root = (Path(settings.BASE_DIR).parent / "research_data").resolve()
+        target = (root / asset_path).resolve()
+        if not target.is_relative_to(root) or not target.is_file() or target.suffix.casefold() not in {".png", ".jpg", ".jpeg", ".webp", ".gif"}:
+            raise Http404
+        response = FileResponse(target.open("rb"))
+        response["Cache-Control"] = "private, no-store"
+        return response
 
 
 def validated(serializer_class, data, **kwargs):
@@ -28,7 +47,7 @@ def get_entity(entity_id):
 
 
 def reading_list_queryset():
-    items = m.ReadingListItem.objects.select_related("catalog_entity__work", "catalog_entity__collection").prefetch_related("catalog_entity__work__isbns", "catalog_entity__categories__category", "catalog_entity__reading_pens__reading_pen_model")
+    items = m.ReadingListItem.objects.select_related("catalog_entity__work", "catalog_entity__collection", "recommended_edition").prefetch_related("catalog_entity__work__editions__isbns", "catalog_entity__categories__category", "catalog_entity__reading_pens__reading_pen_model")
     return m.ReadingList.objects.select_related("creator").prefetch_related(Prefetch("items", queryset=items))
 
 
@@ -56,12 +75,54 @@ class CatalogEntityView(PublicCatalogView):
         return Response(s.CatalogEntitySerializer(get_entity(entity_id)).data)
 
     def patch(self, request, entity_id):
-        values = validated(s.CatalogEntityBookshelfSerializer, request.data).validated_data
+        values = validated(s.CatalogEntityEditSerializer, request.data).validated_data
         with transaction.atomic():
             entity = get_object_or_404(m.CatalogEntity.objects.select_for_update(), pk=entity_id)
-            entity.bookshelf_visible = values["bookshelf_visible"]
-            entity.save(update_fields=["bookshelf_visible"])
+            work_values = values.pop("work", None)
+            volume_count = values.pop("volume_count", serializers.empty)
+            categories = values.pop("category_decisions", None)
+            for key, value in values.items():
+                setattr(entity, key, value)
+            if values:
+                entity.save(update_fields=list(values))
+            if work_values is not None:
+                if entity.entity_type != "book":
+                    raise serializers.ValidationError({"work": "Only a Book has Work fields"})
+                work = entity.work
+                for key, value in work_values.items():
+                    setattr(work, key, value)
+                work.full_clean()
+                work.save()
+            if volume_count is not serializers.empty:
+                if entity.entity_type not in m.COLLECTION_ENTITY_TYPES:
+                    raise serializers.ValidationError({"volume_count": "Only a Collection has volume_count"})
+                entity.collection.volume_count = volume_count
+                entity.collection.save(update_fields=["volume_count", "updated_at"])
+            if categories is not None:
+                choices = s.EntityCategorySerializer(data=categories, many=True)
+                choices.is_valid(raise_exception=True)
+                wanted = {row["category_id"].pk for row in choices.validated_data}
+                m.CatalogEntityCategory.objects.filter(catalog_entity=entity).exclude(category_id__in=wanted).delete()
+                services.assign_entity_categories(entity, [{"category_id": row["category_id"].pk, "is_primary": row["is_primary"]} for row in choices.validated_data])
         return Response(s.CatalogEntitySerializer(get_entity(entity_id)).data)
+
+
+class CatalogEditionView(PublicCatalogView):
+    def post(self, request, entity_id):
+        entity = get_entity(entity_id)
+        if entity.entity_type != "book":
+            raise serializers.ValidationError("Edition requires a Book")
+        serializer = validated(s.BookEditionSerializer, request.data)
+        with transaction.atomic():
+            edition = serializer.save(work=entity.work)
+        return Response(s.BookEditionSerializer(edition).data, status=201)
+
+    def patch(self, request, entity_id, edition_id):
+        edition = get_object_or_404(m.BookEdition, pk=edition_id, work_id=entity_id)
+        serializer = validated(s.BookEditionSerializer, request.data, instance=edition, partial=True)
+        with transaction.atomic():
+            edition = serializer.save()
+        return Response(s.BookEditionSerializer(edition).data)
 
 
 class CatalogSearchView(PublicCatalogView):
@@ -77,7 +138,8 @@ class IsbnAttachView(PublicCatalogView):
     def post(self, request, entity_id):
         get_entity(entity_id)
         isbn = serializers.CharField(max_length=100).run_validation(request.query_params.get("isbn") or request.data.get("isbn"))
-        services.add_isbn(entity_id, isbn)
+        edition_id = request.data.get("edition_id")
+        services.add_isbn(entity_id, isbn, serializers.IntegerField(min_value=1).run_validation(edition_id) if edition_id else None)
         return Response(s.CatalogEntitySerializer(get_entity(entity_id)).data)
 
 
@@ -101,6 +163,64 @@ class CollectionItemsView(PublicCatalogView):
         data = validated(s.CollectionItemSerializer, request.data).validated_data
         services.add_collection_item(collection_id, data["member_entity_id"].pk, data["position"])
         return Response(services.expand_collection(collection_id))
+
+    def delete(self, request, collection_id):
+        member_id = serializers.IntegerField(min_value=1).run_validation(request.data.get("member_entity_id"))
+        get_object_or_404(m.CollectionItem, collection_id=collection_id, member_entity_id=member_id).delete()
+        return Response(status=204)
+
+
+class CatalogAdminAPI(APIView):
+    permission_classes = [permissions.IsAdminUser]
+
+    def handle_exception(self, exc):
+        if isinstance(exc, services.CatalogDomainError):
+            converted = APIException(str(exc))
+            converted.status_code = 400
+            exc = converted
+        return super().handle_exception(exc)
+
+
+class CatalogAdminSearch(CatalogAdminAPI):
+    def post(self, request, entity_id):
+        entity = get_entity(entity_id)
+        provider = serializers.ChoiceField(choices=["amazon", "jd", "official"]).run_validation(request.data.get("provider"))
+        query = serializers.CharField(max_length=500).run_validation(request.data.get("query") or entity.title_en or entity.display_title)
+        return Response(admin_capture.search(provider, query))
+
+
+class CatalogAdminCapture(CatalogAdminAPI):
+    def post(self, request, entity_id):
+        entity = get_entity(entity_id)
+        provider = serializers.ChoiceField(choices=["amazon", "jd", "official"]).run_validation(request.data.get("provider"))
+        scope = serializers.ChoiceField(choices=["page", "edition", "structure"]).run_validation(request.data.get("scope"))
+        try:
+            return Response(admin_capture.capture_candidate(entity, provider, scope))
+        except Exception as error:
+            if isinstance(error, services.CatalogDomainError):
+                raise
+            raise APIException(f"Capture failed: {error}") from error
+
+
+class CatalogAdminConfirm(CatalogAdminAPI):
+    def post(self, request, entity_id):
+        entity = get_entity(entity_id)
+        token = serializers.CharField().run_validation(request.data.get("token"))
+        selected_fields = serializers.ListField(child=serializers.CharField(), allow_empty=True).run_validation(request.data.get("selected_fields", []))
+        edition_id = request.data.get("edition_id")
+        if edition_id is not None:
+            edition_id = serializers.IntegerField(min_value=1).run_validation(edition_id)
+        members = serializers.ListField(child=serializers.DictField(), required=False).run_validation(request.data.get("members", []))
+        admin_capture.confirm_candidate(entity, token, selected_fields, edition_id, members, request.data.get("guide_markdown"))
+        return Response(s.CatalogEntitySerializer(get_entity(entity_id)).data)
+
+
+class CatalogAdminGuideMaterial(CatalogAdminAPI):
+    def post(self, request, entity_id):
+        entity = get_entity(entity_id)
+        raw = serializers.CharField(max_length=50000).run_validation(request.data.get("raw_content"))
+        title = serializers.CharField(max_length=1000, allow_blank=True).run_validation(request.data.get("source_title", ""))
+        return Response(admin_capture.add_guide_material(entity, raw, title))
 
 
 class CreatorsView(PublicCatalogView):

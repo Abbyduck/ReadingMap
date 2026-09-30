@@ -10,8 +10,8 @@ from django.db import models, transaction
 from django.db.models import F, Q
 
 
-ALLOWED_ENTITY_TYPES = frozenset({"book", "animation", "reading_system", "series", "level", "set"})
-COLLECTION_ENTITY_TYPES = frozenset({"reading_system", "series", "level", "set"})
+ALLOWED_ENTITY_TYPES = frozenset({"book", "animation", "reading_system", "series", "level", "set", "franchise"})
+COLLECTION_ENTITY_TYPES = frozenset({"reading_system", "series", "level", "set", "franchise"})
 ENTITY_CHOICES = [
     ("book", "单本"),
     ("animation", "动画"),
@@ -19,7 +19,9 @@ ENTITY_CHOICES = [
     ("series", "系列"),
     ("level", "级别"),
     ("set", "组合"),
+    ("franchise", "IP"),
 ]
+FICTION_TYPE_CHOICES = [("unknown", "未知"), ("fiction", "虚构"), ("nonfiction", "非虚构"), ("mixed", "混合")]
 CATEGORY_TYPE_CHOICES = [
     ("material_type", "阅读材料"),
     ("genre", "内容类型"),
@@ -38,6 +40,10 @@ def normalize_search_text(value: str | None) -> str:
 
 def build_catalog_search_text(entity) -> str:
     values = [entity.display_title, entity.title_zh, entity.title_en, *(entity.aliases or [])]
+    if entity.entity_type == "book" and entity.pk:
+        work = Work.objects.filter(pk=entity.pk).first()
+        if work is not None:
+            values.extend([work.author_text, work.illustrator_text, work.translator_text])
     return "\n".join(dict.fromkeys(normalize_search_text(v) for v in values if normalize_search_text(v)))
 
 
@@ -58,9 +64,13 @@ class CatalogEntity(TimestampModel):
     search_text = models.TextField(blank=True, editable=False)
     description = models.TextField(null=True, blank=True)
     extra_info = models.TextField(null=True, blank=True)
-    cover_url = models.URLField(max_length=1000, null=True, blank=True)
-    cover_local_path = models.CharField(max_length=1000, null=True, blank=True)
-    detail_images = models.JSONField(null=True, blank=True)
+    guide_markdown = models.TextField(null=True, blank=True)
+    fiction_type = models.CharField(max_length=20, choices=FICTION_TYPE_CHOICES, default="unknown")
+    # Legacy source evidence only. New Catalog covers live on BookEdition.
+    cover_url = models.URLField(max_length=1000, null=True, blank=True, editable=False)
+    cover_local_path = models.CharField(max_length=1000, null=True, blank=True, editable=False)
+    # Kept for old non-Book rows; Book interior previews live on Work.
+    detail_images = models.JSONField(null=True, blank=True, editable=False)
     independent_reading_suitable = models.BooleanField(null=True, blank=True)
     bookshelf_visible = models.BooleanField(default=False)
 
@@ -78,8 +88,6 @@ class CatalogEntity(TimestampModel):
             raise ValidationError({"display_title": "标题不能为空。"})
         if self.aliases is not None and (not isinstance(self.aliases, list) or any(not isinstance(v, str) for v in self.aliases)):
             raise ValidationError({"aliases": "别名必须是字符串列表。"})
-        if self.detail_images is not None and not isinstance(self.detail_images, list):
-            raise ValidationError({"detail_images": "详情图片必须是列表。"})
         if self.pk:
             old_type = type(self).objects.filter(pk=self.pk).values_list("entity_type", flat=True).first()
             if old_type and old_type != self.entity_type:
@@ -102,8 +110,9 @@ class Work(TimestampModel):
     catalog_entity = models.OneToOneField(CatalogEntity, primary_key=True, related_name="work", on_delete=models.CASCADE)
     author_text = models.CharField(max_length=1000, null=True, blank=True)
     illustrator_text = models.CharField(max_length=1000, null=True, blank=True)
+    translator_text = models.CharField(max_length=1000, null=True, blank=True)
     language_code = models.CharField(max_length=50, null=True, blank=True)
-    page_count = models.PositiveIntegerField(null=True, blank=True)
+    detail_images = models.JSONField(null=True, blank=True)
     word_count = models.PositiveIntegerField(null=True, blank=True)
     headword_count = models.PositiveIntegerField(null=True, blank=True)
     ar_level = models.DecimalField(max_digits=4, decimal_places=2, null=True, blank=True)
@@ -118,14 +127,46 @@ class Work(TimestampModel):
     def clean(self):
         if self.catalog_entity_id and self.catalog_entity.entity_type != "book":
             raise ValidationError({"catalog_entity": "只有 book 类型可包含图书事实字段。"})
+        if self.detail_images is not None and not isinstance(self.detail_images, list):
+            raise ValidationError({"detail_images": "详情图片必须是列表。"})
+        if isinstance(self.detail_images, list) and any(
+            not isinstance(path, str) or not path or path.casefold().startswith(("http://", "https://", "//", "data:"))
+            for path in self.detail_images
+        ):
+            raise ValidationError({"detail_images": "详情图片必须使用项目保存的本地路径。"})
 
     def save(self, *args, **kwargs):
         self.clean()
         super().save(*args, **kwargs)
+        entity = self.catalog_entity
+        search_text = build_catalog_search_text(entity)
+        if entity.search_text != search_text:
+            CatalogEntity.objects.filter(pk=entity.pk).update(search_text=search_text)
+
+
+class BookEdition(TimestampModel):
+    work = models.ForeignKey(Work, related_name="editions", on_delete=models.CASCADE)
+    cover_local_path = models.CharField(max_length=1000, null=True, blank=True)
+    publisher = models.CharField(max_length=500, null=True, blank=True)
+    format = models.CharField(max_length=100, null=True, blank=True)
+    page_count = models.PositiveIntegerField(null=True, blank=True)
+    publication_date = models.DateField(null=True, blank=True)
+    dimensions = models.CharField(max_length=255, null=True, blank=True)
+
+    class Meta:
+        db_table = "book_editions"
+
+    def clean(self):
+        if self.cover_local_path and self.cover_local_path.casefold().startswith(("http://", "https://", "//", "data:")):
+            raise ValidationError({"cover_local_path": "版本封面必须使用项目保存的本地路径。"})
+
+    def save(self, *args, **kwargs):
+        self.full_clean()
+        super().save(*args, **kwargs)
 
 
 class CatalogIsbn(models.Model):
-    work_entity = models.ForeignKey(Work, related_name="isbns", on_delete=models.CASCADE)
+    edition = models.ForeignKey(BookEdition, related_name="isbns", on_delete=models.CASCADE)
     isbn_type = models.PositiveSmallIntegerField(choices=[(10, "ISBN-10"), (13, "ISBN-13")])
     isbn_val = models.CharField(max_length=20)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -284,6 +325,7 @@ class ReadingList(TimestampModel):
 class ReadingListItem(TimestampModel):
     reading_list = models.ForeignKey(ReadingList, related_name="items", on_delete=models.CASCADE)
     catalog_entity = models.ForeignKey(CatalogEntity, related_name="reading_list_items", on_delete=models.CASCADE)
+    recommended_edition = models.ForeignKey(BookEdition, null=True, blank=True, on_delete=models.SET_NULL, related_name="recommendations")
     position = models.PositiveIntegerField(null=True, blank=True)
     sub_position = models.PositiveSmallIntegerField(null=True, blank=True)
     stage_label = models.CharField(max_length=255, null=True, blank=True)
@@ -306,6 +348,12 @@ class ReadingListItem(TimestampModel):
 
     def clean(self):
         validate_age_range(self, "recommended_age_min_months", "recommended_age_max_months")
+        if self.recommended_edition_id and (self.catalog_entity.entity_type != "book" or self.recommended_edition.work_id != self.catalog_entity_id):
+            raise ValidationError({"recommended_edition": "推荐版本必须属于该单本的 Work。"})
+
+    def save(self, *args, **kwargs):
+        self.full_clean()
+        super().save(*args, **kwargs)
 
 
 class CatalogCategory(TimestampModel):

@@ -5,6 +5,7 @@ import hashlib
 import json
 import re
 import unicodedata
+import uuid
 from contextlib import contextmanager
 from decimal import Decimal
 from difflib import SequenceMatcher
@@ -17,13 +18,13 @@ from django.db.models import F, Q
 from django.utils import timezone
 
 from catalog.models import (
-    ALLOWED_ENTITY_TYPES, COLLECTION_ENTITY_TYPES, CatalogCategory, CatalogEntity, CatalogEntityReadingPen, ReadingList,
+    ALLOWED_ENTITY_TYPES, COLLECTION_ENTITY_TYPES, BookEdition, CatalogCategory, CatalogEntity, CatalogEntityReadingPen, CatalogIsbn, ReadingList,
     ReadingListItem, ReadingPenModel, normalize_search_text,
 )
-from catalog.services import CatalogDomainError, assign_entity_categories, add_collection_item, add_isbn, create_catalog_entity
+from catalog.services import CatalogDomainError, assign_entity_categories, add_collection_item, create_catalog_entity, equivalent_isbns, normalize_isbn
 from .models import (
     ResearchCatalogCandidate, ResearchSource, ResearchSubject, ResearchSubjectRelation,
-    ResearchSubjectSource, ReviewActionLog, ReviewBatch, ReviewDataConflict, ReviewItem, ReviewItemSubject,
+    ResearchSubjectSource, ReviewActionLog, ReviewBatch, ReviewDataConflict, ReviewEditionDraft, ReviewItem, ReviewItemSubject,
 )
 
 SOURCE_ROOT = Path(settings.BASE_DIR).parent / "source_data"
@@ -422,7 +423,7 @@ def refresh_catalog_candidates(subject):
     title = normalize_search_text(subject.proposed_display_title)
     isbn_values = {"".join(ch for ch in str(value).upper() if ch.isdigit() or ch == "X") for value in _isbn_list(subject.facts_json)}
     scored = []
-    for entity in CatalogEntity.objects.select_related("work").prefetch_related("work__isbns"):
+    for entity in CatalogEntity.objects.select_related("work").prefetch_related("work__editions__isbns"):
         values = [entity.display_title, entity.title_zh, entity.title_en, *(entity.aliases or [])]
         normalized = [normalize_search_text(value) for value in values if value]
         similarity = max((SequenceMatcher(None, title, value).ratio() for value in normalized), default=0)
@@ -438,7 +439,7 @@ def refresh_catalog_candidates(subject):
             if similarity >= .55:
                 reasons.append("标题相似")
         work = getattr(entity, "work", None)
-        if isbn_values & {row.isbn_val for row in work.isbns.all()} if work else False:
+        if isbn_values & {row.isbn_val for edition in work.editions.all() for row in edition.isbns.all()} if work else False:
             score = Decimal("1.0000")
             reasons.insert(0, "ISBN 精确匹配")
         if subject.resolved_catalog_entity_id == entity.pk:
@@ -503,6 +504,13 @@ def stage_parent_structure(item, values):
         "review_item_id": item.pk,
         "subject_role": "discovered_parent",
     })
+    child = ResearchSubject.objects.get(pk=child_subject_id)
+    if entity_type == "series" and child.proposed_entity_type == "book":
+        classification = (child.ai_inferences_json or {}).get("classification")
+        ids = list(values.get("category_ids") or [])
+        if ids or classification:
+            parent.ai_inferences_json = {"classification": classification or {}, "classification_prefill_ids": ids}
+            parent.save(update_fields=["ai_inferences_json"])
     relation = create_research_relation({
         "parent_subject_id": parent.pk,
         "member_subject_id": child_subject_id,
@@ -832,7 +840,7 @@ def apply_jd_capture(subject, capture, actor=None):
     return _apply_product_capture(subject, capture, actor, retailer_code="jd", retailer_label="京东")
 
 
-def apply_official_capture(subject, capture, actor=None):
+def apply_official_capture(subject, capture, actor=None, *, structure_only=False):
     """Merge a verified official record into review-only research facts."""
     if subject.resolved_catalog_entity_id is not None or subject.item_links.filter(review_item__status__in=TERMINAL_ITEM_STATUSES).exists():
         raise ReviewDomainError("Research cannot modify a resolved subject or an already reviewed item")
@@ -852,7 +860,10 @@ def apply_official_capture(subject, capture, actor=None):
     ResearchSubjectSource.objects.get_or_create(research_subject=subject, research_source=source)
 
     facts = dict(subject.facts_json or {})
-    for key, value in dict(capture.get("facts") or {}).items():
+    page_facts = {} if structure_only else dict(capture.get("facts") or {})
+    for key in ("cover", "cover_local_path", "product_images", "isbns", "isbn", "publisher", "format", "page_count", "publication_date", "dimensions"):
+        page_facts.pop(key, None)
+    for key, value in page_facts.items():
         if value in (None, "", [], {}):
             continue
         if key == "language":
@@ -873,7 +884,7 @@ def apply_official_capture(subject, capture, actor=None):
 
     subject.facts_json = facts
     type_suggestion = capture.get("entity_type_suggestion")
-    if isinstance(type_suggestion, dict) and type_suggestion.get("value") in ALLOWED_ENTITY_TYPES:
+    if not structure_only and isinstance(type_suggestion, dict) and type_suggestion.get("value") in ALLOWED_ENTITY_TYPES:
         subject.proposed_entity_type = type_suggestion["value"]
         inferences = dict(subject.ai_inferences_json or {})
         inferences["entity_type"] = {
@@ -899,7 +910,7 @@ def apply_official_capture(subject, capture, actor=None):
     # An official page may be the first source that exposes the direct
     # collection structure.  Stage that structure immediately as confirmed
     # source evidence, but do not create formal Catalog rows here.
-    for direction, rows in (("member", capture.get("members") or []), ("parent", capture.get("parents") or [])):
+    for direction, rows in (("member", capture.get("members") or []), ("parent", capture.get("parents") or [])) if structure_only else ():
         if not isinstance(rows, list):
             raise ReviewDomainError(f"Official {direction} structure must be a list")
         for position, row in enumerate(rows, 1):
@@ -946,16 +957,7 @@ def apply_official_capture(subject, capture, actor=None):
                 "facts": row.get("facts") or {},
             }
             if discovered.resolved_catalog_entity_id is None:
-                apply_official_capture(discovered, member_capture, actor)
-                if direction == "member":
-                    language_source_id = discovered.source_links.filter(
-                        research_source__source_url=member_capture["source_url"],
-                    ).values_list("research_source_id", flat=True).first() or source.pk
-                    _ensure_subject_language(
-                        discovered,
-                        parent_subject=subject,
-                        source_id=language_source_id,
-                    )
+                apply_official_capture(discovered, member_capture, actor, structure_only=True)
             else:
                 ResearchSubjectSource.objects.get_or_create(research_subject=discovered, research_source=source)
 
@@ -1237,6 +1239,8 @@ def _apply_product_capture(subject, capture, actor=None, *, retailer_code, retai
     ResearchSubjectSource.objects.get_or_create(research_subject=subject, research_source=source)
 
     incoming = dict(capture.get("facts") or {})
+    for key in ("isbns", "isbn", "publisher", "format", "page_count", "publication_date", "dimensions"):
+        incoming.pop(key, None)
     if incoming.get("language"):
         incoming["language"] = _normalized_language_code(incoming["language"]) or incoming["language"]
     # Older trial captures stored retailer-only identifiers and full retailer
@@ -1324,7 +1328,7 @@ def _apply_product_capture(subject, capture, actor=None, *, retailer_code, retai
     refresh_catalog_candidates(subject)
     item_ids = list(subject.item_links.values_list("review_item_id", flat=True))
     touched_subject_ids = [subject.pk]
-    member_titles = (incoming.get("included_titles") or []) if subject.proposed_entity_type in COLLECTION_ENTITY_TYPES else []
+    member_titles = []  # Structure has its own explicit Capture action.
     for position, member_title in enumerate(member_titles, 1):
         title = _plain_title(member_title)
         if not title:
@@ -1411,7 +1415,7 @@ def _refresh_selected_image_facts(facts):
             facts["cover_local_path"] = {"value": cover["local_path"], "source_ids": [cover_source_id]}
         else:
             facts.pop("cover_local_path", None)
-    selected = [image for image in available if image.get("selected") is not False]
+    selected = [image for image in available if image.get("selected") is not False and image.get("role") != "cover"]
     details = [
         {"source_url": image["source_url"], "local_path": image.get("local_path")}
         for image in selected
@@ -1537,17 +1541,27 @@ def _set_or_conflict(item, subject, entity, target, attribute, field_path, propo
 
 def _apply_objective_facts(item, subject, entity):
     _set_or_conflict(item, subject, entity, entity, "description", "catalog.description", _objective_fact_value(subject, "description"))
-    _set_or_conflict(item, subject, entity, entity, "cover_url", "catalog.cover_url", _objective_fact_value(subject, "cover"))
-    _set_or_conflict(item, subject, entity, entity, "cover_local_path", "catalog.cover_local_path", _objective_fact_value(subject, "cover_local_path"))
     _set_or_conflict(item, subject, entity, entity, "extra_info", "catalog.extra_info", _objective_fact_value(subject, "extra_info"))
-    _set_or_conflict(item, subject, entity, entity, "detail_images", "catalog.detail_images", _objective_fact_value(subject, "detail_images"))
+    _set_or_conflict(item, subject, entity, entity, "guide_markdown", "catalog.guide_markdown", subject.guide_markdown_draft or None)
+    proposed_fiction = _objective_fact_value(subject, "fiction_type")
+    if proposed_fiction in {"fiction", "nonfiction", "mixed"}:
+        if entity.fiction_type == "unknown":
+            entity.fiction_type = proposed_fiction
+        elif entity.fiction_type != proposed_fiction:
+            _record_conflict(item, subject, entity, "catalog.fiction_type", entity.fiction_type, proposed_fiction)
     work = getattr(entity, "work", None)
     if work:
         for key, attr in {
-            "author": "author_text", "illustrator": "illustrator_text", "language": "language_code", "page_count": "page_count",
+            "author": "author_text", "illustrator": "illustrator_text", "translator": "translator_text", "language": "language_code",
             "word_count": "word_count", "headwords": "headword_count", "ar": "ar_level", "lexile": "lexile_code",
         }.items():
             _set_or_conflict(item, subject, entity, work, attr, f"work.{attr}", _objective_fact_value(subject, key))
+        images = _objective_fact_value(subject, "detail_images")
+        if isinstance(images, list):
+            paths = [image.get("local_path") if isinstance(image, dict) else image for image in images]
+            paths = [path for path in paths if isinstance(path, str) and path and not path.startswith(("http://", "https://"))]
+            if paths:
+                _set_or_conflict(item, subject, entity, work, "detail_images", "work.detail_images", paths)
         work.save()
     collection = getattr(entity, "collection", None)
     if collection:
@@ -1567,20 +1581,6 @@ def _apply_objective_facts(item, subject, entity):
         if normalized:
             pen, _ = ReadingPenModel.objects.get_or_create(normalized_name=normalized, defaults={"name": str(name)})
             CatalogEntityReadingPen.objects.get_or_create(catalog_entity=entity, reading_pen_model=pen)
-    isbn_values = _objective_fact_value(subject, "isbns") or _objective_fact_value(subject, "isbn") or []
-    if isinstance(isbn_values, str):
-        isbn_values = [isbn_values]
-    if not isinstance(isbn_values, list):
-        raise ReviewDomainError("isbns must be a string or a list")
-    for isbn in isbn_values:
-        if not work:
-            _record_conflict(item, subject, entity, "work.isbn", None, isbn)
-        else:
-            try:
-                with transaction.atomic():
-                    add_isbn(entity.pk, str(isbn))
-            except CatalogDomainError:
-                _record_conflict(item, subject, entity, "work.isbn", None, isbn)
 
 
 def _create_entity_from_subject(item, subject, bookshelf_visible=False):
@@ -1605,7 +1605,7 @@ def _bind_subject(subject, entity, status):
     subject.save()
 
 
-def _resolve_structure(item, selected_ids, decisions, bookshelf_visibility):
+def _resolve_structure(item, selected_ids, decisions, bookshelf_visibility, category_decisions=None):
     primary_id = item.subject_links.get(subject_role="primary").research_subject_id
     relation_rows = list(ResearchSubjectRelation.objects.filter(
         parent_subject_id__in=selected_ids, member_subject_id__in=selected_ids, relation_type="contains",
@@ -1646,14 +1646,14 @@ def _resolve_structure(item, selected_ids, decisions, bookshelf_visibility):
                 _bind_subject(subject, entity, "matched")
                 _apply_objective_facts(item, subject, entity)
             elif choice["decision"] == "create_new":
-                strong = [row for row in refreshed_candidates[subject.pk] if row.match_score >= STRONG_MATCH_SCORE]
-                if strong:
-                    raise DuplicateCandidateError(strong)
                 entity = _create_entity_from_subject(item, subject, bookshelf_visibility.get(subject.pk, False))
             else:
                 raise ReviewDomainError("Invalid structure decision")
         entity.bookshelf_visible = bookshelf_visibility.get(subject.pk, False)
         entity.save(update_fields=["bookshelf_visible"])
+        if category_decisions and subject.pk in category_decisions:
+            assign_entity_categories(entity, [{"category_id": category_id, "is_primary": False}
+                                              for category_id in category_decisions[subject.pk]])
         resolved[subject.pk] = entity
     if set(resolved) != selected_ids:
         raise ReviewDomainError("One or more structure subjects do not exist")
@@ -1664,7 +1664,175 @@ def _resolve_structure(item, selected_ids, decisions, bookshelf_visibility):
     return resolved
 
 
-def _commit_source_relation(item, entity):
+def stage_edition_capture(item, subject, capture, provider):
+    """Keep physical-version facts in Review without mutating Work Research."""
+    if item.status in TERMINAL_ITEM_STATUSES or subject.proposed_entity_type != "book":
+        raise ReviewDomainError("Edition Capture requires an unresolved Book review item")
+    if not item.subject_links.filter(research_subject=subject).exists():
+        raise ReviewDomainError("Book subject does not belong to this review item")
+    facts = dict(capture.get("facts") or {})
+    isbn_values = facts.get("isbns") or facts.get("isbn") or []
+    if isinstance(isbn_values, str):
+        isbn_values = [isbn_values]
+    isbns = []
+    for value in isbn_values:
+        kind, normalized = normalize_isbn(str(value))
+        if kind and normalized not in isbns:
+            isbns.append(normalized)
+    images = facts.get("product_images") or capture.get("downloaded_assets") or []
+    covers = [image for image in images if isinstance(image, dict) and image.get("role") == "cover"]
+    if not covers and facts.get("cover"):
+        local_path = None
+        if provider == "official":
+            from catalog.admin_capture import _adopt_official_cover
+            local_path = _adopt_official_cover(facts["cover"], capture.get("source_url") or "")
+        covers = [{"source_url": facts["cover"], "local_path": local_path}]
+    data = {key: facts[key] for key in ("publisher", "format", "page_count", "publication_date", "dimensions") if facts.get(key) not in (None, "")}
+    data["isbns"] = isbns
+    data["cover_choices"] = covers
+    data["cover_local_path"] = next((row.get("local_path") for row in covers if row.get("local_path")), None)
+    source_url = capture.get("source_url")
+    if not source_url:
+        raise ReviewDomainError("Edition Capture requires a source URL")
+    source = ResearchSource.objects.create(
+        source_type=f"{provider}_edition", source_url=source_url,
+        source_title=capture.get("source_title") or capture.get("title"), fetched_at=timezone.now(),
+    )
+    ResearchSubjectSource.objects.get_or_create(research_subject=subject, research_source=source)
+    isbn_family = set().union(*(equivalent_isbns(value) for value in isbns)) if isbns else set()
+    matched_isbn = CatalogIsbn.objects.select_related("edition").filter(isbn_val__in=isbn_family).first() if isbn_family else None
+    draft = None
+    if isbns:
+        for row in item.edition_drafts.filter(book_subject=subject).order_by("pk"):
+            prior_family = set().union(*(equivalent_isbns(value) for value in row.proposed_data.get("isbns") or []))
+            if prior_family & isbn_family:
+                draft = row
+                break
+    if draft is None and not isbns:
+        cover_urls = {row.get("source_url") for row in covers}
+        for row in item.edition_drafts.filter(book_subject=subject).order_by("pk"):
+            if cover_urls & {image.get("source_url") for image in row.proposed_data.get("cover_choices") or []}:
+                draft = row
+                break
+    if draft is None:
+        draft = ReviewEditionDraft(review_item=item, book_subject=subject)
+    if draft.review_status == "confirmed":
+        # A later capture may add evidence, but never silently replace the human decision.
+        merged = dict(draft.proposed_data)
+        merged["cover_choices"] = list({row.get("source_url"): row for row in [*(merged.get("cover_choices") or []), *covers] if row.get("source_url")}.values())
+        draft.proposed_data = merged
+    else:
+        previous = draft.proposed_data or {}
+        data["cover_choices"] = list({row.get("source_url"): row for row in [*(previous.get("cover_choices") or []), *covers] if row.get("source_url")}.values())
+        data["isbns"] = list(dict.fromkeys([*(previous.get("isbns") or []), *isbns]))
+        draft.proposed_data = {**previous, **data}
+        draft.matched_catalog_edition = matched_isbn.edition if matched_isbn else None
+    draft.source = source
+    draft.save()
+    ReviewActionLog.objects.create(review_item=item, action="edition_captured", details_json={"draft_id": draft.pk, "provider": provider, "source_url": source_url})
+    _touch_research_items([subject.pk])
+    return draft
+
+
+def stage_structure_capture(item, subject, capture, provider, actor=None):
+    """Stage only direct Research relations from an explicit Structure Capture."""
+    if item.status in TERMINAL_ITEM_STATUSES or not item.subject_links.filter(research_subject=subject).exists():
+        raise ReviewDomainError("Structure Capture requires an unresolved subject in this item")
+    if provider == "official":
+        apply_official_capture(subject, capture, actor, structure_only=True)
+        return list(subject.member_relations.values_list("id", flat=True))
+    titles = (capture.get("facts") or {}).get("included_titles") or []
+    if not isinstance(titles, list):
+        raise ReviewDomainError("Structure members must be a list")
+    if subject.proposed_entity_type not in COLLECTION_ENTITY_TYPES:
+        return []
+    source = ResearchSource.objects.create(
+        source_type=f"{provider}_structure", source_url=capture.get("source_url") or "",
+        source_title=capture.get("title"), fetched_at=timezone.now(),
+    )
+    ResearchSubjectSource.objects.get_or_create(research_subject=subject, research_source=source)
+    relation_ids = []
+    for raw_title in titles:
+        title = _plain_title(raw_title)
+        if not title:
+            continue
+        relation = next((row for row in subject.member_relations.select_related("member_subject")
+                         if normalize_search_text(row.member_subject.proposed_display_title) == normalize_search_text(title)), None)
+        if relation is None:
+            member = ResearchSubject.objects.create(proposed_entity_type="book", proposed_display_title=title,
+                                                    proposed_title_en=title, research_status="partial")
+            ReviewItemSubject.objects.get_or_create(review_item=item, research_subject=member,
+                                                    defaults={"subject_role": "discovered_member"})
+            relation = ResearchSubjectRelation.objects.create(parent_subject=subject, member_subject=member,
+                                                               relation_type="contains", evidence_type="source_fact")
+        ResearchSubjectSource.objects.get_or_create(research_subject=relation.member_subject, research_source=source)
+        relation_ids.append(relation.pk)
+    _touch_research_items([subject.pk])
+    return relation_ids
+
+
+def stage_guide_material(item, subject, raw_content, source_title=""):
+    if item.status in TERMINAL_ITEM_STATUSES or not item.subject_links.filter(research_subject=subject).exists():
+        raise ReviewDomainError("Guide material requires an unresolved subject in this item")
+    source = ResearchSource.objects.create(
+        source_type="manual_guide", source_url=f"manual://review/{item.pk}/{subject.pk}/{uuid.uuid4().hex}",
+        source_title=source_title or "手工资料", raw_content=raw_content, fetched_at=timezone.now(),
+    )
+    ResearchSubjectSource.objects.create(research_subject=subject, research_source=source)
+    # This is an editable working draft. Nothing reaches Catalog before Review commit.
+    if not subject.guide_markdown_draft:
+        paragraphs = [line.strip() for line in raw_content.splitlines() if line.strip()]
+        subject.guide_markdown_draft = "\n\n".join(paragraphs)
+        subject.save(update_fields=["guide_markdown_draft", "updated_at"])
+    _touch_research_items([subject.pk])
+    return source
+
+
+def _commit_recommended_edition(item, entity, values):
+    edition_id = values.get("recommended_edition_id")
+    draft_id = values.get("recommended_edition_draft_id")
+    if edition_id and draft_id:
+        raise ReviewDomainError("Choose one recommended Edition")
+    if not edition_id and not draft_id:
+        return None
+    if entity.entity_type != "book":
+        raise ReviewDomainError("Only a Book recommendation may select an Edition")
+    if edition_id:
+        edition = BookEdition.objects.filter(pk=edition_id, work_id=entity.pk).first()
+        if edition is None:
+            raise ReviewDomainError("Recommended Edition must belong to the selected Book")
+        return edition
+    draft = item.edition_drafts.select_for_update().filter(pk=draft_id, review_status="confirmed").first()
+    if draft is None:
+        raise ReviewDomainError("Confirm the Edition Draft before recommending it")
+    edition = draft.matched_catalog_edition
+    if edition is not None and edition.work_id != entity.pk:
+        raise ReviewDomainError("Matched Edition belongs to another Book")
+    data = dict(draft.proposed_data or {})
+    if edition is None:
+        edition = BookEdition(work_id=entity.pk)
+    for field in ("cover_local_path", "publisher", "format", "page_count", "publication_date", "dimensions"):
+        value = data.get(field)
+        if value not in (None, "") and getattr(edition, field) in (None, ""):
+            setattr(edition, field, value)
+    edition.full_clean()
+    edition.save()
+    for raw in data.get("isbns") or []:
+        kind, normalized = normalize_isbn(raw)
+        if kind is None:
+            continue
+        existing = CatalogIsbn.objects.filter(isbn_type=kind, isbn_val=normalized).first()
+        if existing and existing.edition_id != edition.pk:
+            raise ReviewDomainError("ISBN already belongs to another Edition")
+        if not existing:
+            CatalogIsbn.objects.create(edition=edition, isbn_type=kind, isbn_val=normalized)
+    draft.matched_catalog_edition = edition
+    draft.review_status = "committed"
+    draft.save(update_fields=["matched_catalog_edition", "review_status", "updated_at"])
+    return edition
+
+
+def _commit_source_relation(item, entity, recommended_edition=None):
     if item.committed_reading_list_item_id is not None:
         return
     batch = item.batch
@@ -1687,7 +1855,8 @@ def _commit_source_relation(item, entity):
     for key in ("source_ar_text", "source_lexile_text", "source_level_text"):
         fields[key] = str(extracted[key]) if extracted.get(key) is not None else None
     relation = ReadingListItem(
-        reading_list_id=batch.target_reading_list_id, catalog_entity=entity, position=item.position, **fields,
+        reading_list_id=batch.target_reading_list_id, catalog_entity=entity, recommended_edition=recommended_edition,
+        position=item.position, **fields,
     )
     relation.full_clean()
     relation.save()
@@ -1739,9 +1908,7 @@ def resolve_review_item(item_id, values):
         entity.save(update_fields=["bookshelf_visible"])
         item.status = "resolved"
     else:
-        strong = [row for row in refresh_catalog_candidates(subject) if row.match_score >= STRONG_MATCH_SCORE]
-        if strong:
-            raise DuplicateCandidateError(strong)
+        refresh_catalog_candidates(subject)
         entity = _create_entity_from_subject(item, subject, bookshelf_visibility.get(subject.pk, False))
         item.status = "resolved"
     if entity is not None:
@@ -1757,11 +1924,16 @@ def resolve_review_item(item_id, values):
             decisions = {row["subject_id"]: row for row in choices}
             if len(decisions) != len(choices) or not set(decisions).issubset(selected):
                 raise ReviewDomainError("Structure decisions must be unique and selected")
-            _resolve_structure(item, selected, decisions, bookshelf_visibility)
+            category_rows = values.get("structure_category_decisions") or []
+            structure_categories = {int(row["subject_id"]): list(row.get("category_ids") or []) for row in category_rows}
+            if len(structure_categories) != len(category_rows) or not set(structure_categories).issubset(selected):
+                raise ReviewDomainError("Structure classification decisions must be unique and selected")
+            _resolve_structure(item, selected, decisions, bookshelf_visibility, structure_categories)
         entity.bookshelf_visible = bookshelf_visibility.get(subject.pk, False)
         entity.save(update_fields=["bookshelf_visible"])
         assign_entity_categories(entity, values.get("category_decisions") or [])
-        _commit_source_relation(item, entity)
+        recommended_edition = _commit_recommended_edition(item, entity, values)
+        _commit_source_relation(item, entity, recommended_edition)
     item.decision = decision
     item.manual_note = values.get("manual_note")
     item.lock_version += 1
@@ -1787,13 +1959,18 @@ def resolve_conflict(conflict, status, actor, note):
     if status == "use_proposed":
         entity = CatalogEntity.objects.select_for_update().get(pk=conflict.catalog_entity_id)
         work = getattr(entity, "work", None)
+        collection = getattr(entity, "collection", None)
         targets = {
-            "catalog.description": (entity, "description"), "catalog.cover_url": (entity, "cover_url"),
-            "catalog.cover_local_path": (entity, "cover_local_path"), "catalog.extra_info": (entity, "extra_info"),
-            "catalog.detail_images": (entity, "detail_images"),
+            "catalog.description": (entity, "description"), "catalog.extra_info": (entity, "extra_info"),
+            "catalog.guide_markdown": (entity, "guide_markdown"),
+            "catalog.fiction_type": (entity, "fiction_type"),
+            "collection.volume_count": (collection, "volume_count"),
+            "collection.lexile_min": (collection, "lexile_min"),
+            "collection.lexile_max": (collection, "lexile_max"),
         }
         targets.update({f"work.{attr}": (work, attr) for attr in (
-            "author_text", "illustrator_text", "language_code", "page_count", "word_count", "headword_count", "ar_level", "lexile_code",
+            "author_text", "illustrator_text", "translator_text", "language_code", "detail_images",
+            "word_count", "headword_count", "ar_level", "lexile_code",
         )})
         target = targets.get(conflict.field_path)
         if not target or target[0] is None:
@@ -1887,10 +2064,10 @@ def subject_to_dict(subject):
     result = {key: getattr(subject, key) for key in (
         "id", "proposed_entity_type", "proposed_display_title", "proposed_title_zh", "proposed_title_en",
         "proposed_aliases", "facts_json", "ai_inferences_json", "research_status", "resolution_status",
-        "resolved_catalog_entity_id", "manual_note", "research_version", "researched_at",
+        "resolved_catalog_entity_id", "manual_note", "research_version", "researched_at", "guide_markdown_draft",
     )}
     result["sources"] = [
-        {key: getattr(link.research_source, key) for key in ("id", "source_type", "source_url", "source_title", "fetched_at")}
+        {key: getattr(link.research_source, key) for key in ("id", "source_type", "source_url", "source_title", "fetched_at", "raw_content")}
         for link in subject.source_links.select_related("research_source").order_by("pk")
     ]
     result["resolved_bookshelf_visible"] = (
@@ -1934,4 +2111,11 @@ def review_item_to_dict(item):
     result["subjects"] = []
     for link in sorted(item.subject_links.select_related("research_subject"), key=lambda row: (row.subject_role != "primary", row.research_subject_id)):
         result["subjects"].append({**subject_to_dict(link.research_subject), "subject_role": link.subject_role})
+    result["edition_drafts"] = [
+        {"id": draft.pk, "book_subject_id": draft.book_subject_id,
+         "matched_catalog_edition_id": draft.matched_catalog_edition_id,
+         "proposed_data": draft.proposed_data, "review_status": draft.review_status,
+         "source_id": draft.source_id}
+        for draft in item.edition_drafts.order_by("pk")
+    ]
     return result
