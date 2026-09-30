@@ -282,20 +282,89 @@ After human decision:
 
 Reusing an Entity never forces Research.
 
-### Three Capture actions
+### Search sources vs. Capture purposes
 
-Capture meaning is determined by the button/business area, not by every fact detectable on the webpage.
+Search source and Capture purpose are two different dimensions.
 
-1. **Capture Current Page** → Entity/Work Research, content identity facts, Work detail images.
-2. **Capture Current Edition** → Edition Draft only: cover, ISBN, publisher, format, page count, publication date, dimensions.
-3. **Capture Structure** → Structure Draft only: Collection identity, direct parent/member edges, explicit order when truly present.
+#### Search sources
+
+The main Research toolbar provides direct source-specific search actions:
+
+- Search Amazon
+- Search JD
+- Search Official
+
+They all open/use the same monitored helper-browser session.
+
+Do not require a provider tab switch before searching. The reviewer chooses the source directly by clicking the corresponding Search button.
+
+Search only decides where to look. It does not decide the business write target.
+
+### Three Capture purposes
+
+There are three distinct capture purposes:
+
+1. **Current Page / Research** → Entity/Work Research candidates, content identity facts, and Work detail images.
+2. **Current Edition** → Edition Draft only: cover, ISBN, publisher, format, page count, publication date, dimensions.
+3. **Structure** → Structure Draft only: Collection identity, direct parent/member relationships, and explicit sequence when truly present.
+
+These are business destinations, not provider choices.
+
+Amazon / JD / Official are source providers.
+Current Page / Edition / Structure are capture purposes.
+
+Never multiply capture purposes by source provider.
 
 Edition capture must not mutate/re-run Work Draft or Work detail images. Structure capture must not mutate Work, Edition, images, Classification, or generic Work facts.
 
-Amazon/JD/Official share the human-in-the-loop model:
-Search opens/uses the monitored helper-browser session → user navigates → user explicitly clicks the relevant Capture button.
+#### Capture Current Page
 
-Official must not auto-capture.
+The main Research toolbar has exactly one shared Current Page capture action.
+
+Amazon, JD, and Official do **not** have separate Current Page Capture buttons.
+
+When the reviewer clicks Capture:
+
+1. inspect the current target page in the monitored browser;
+2. determine the provider from the current URL/host;
+3. dispatch to the appropriate provider extractor;
+4. write only Entity/Work Research candidates allowed by Current Page capture.
+
+Examples:
+- `amazon.*` → Amazon extractor;
+- `jd.com` → JD extractor;
+- recognized publisher/official site → Official extractor.
+
+The reviewer must not need to tell the system again which provider is open. The current browser URL is the source of truth.
+
+If the URL cannot be recognized safely, fail visibly and ask the reviewer to navigate to a supported target page. Do not guess a provider.
+
+Flow:
+
+provider-specific Search
+→ reviewer navigates/chooses the intended page
+→ one shared Current Page Capture
+→ provider inferred from current URL
+→ provider-specific extractor
+→ normalized Entity/Work Research candidates
+
+Official pages never auto-capture.
+
+#### Current Edition placement
+
+Capture Current Edition belongs to the Edition review/edit area because its result is Edition Draft.
+
+It does not belong in the main Entity/Work Research toolbar.
+
+If the Review page does not yet have an Edition section, do not add a temporary top-level Edition capture button merely to expose the action. Leave the action unexposed until the Edition area is implemented.
+
+#### Structure capture placement
+
+Capture Structure belongs to the Structure area.
+
+It may inspect the current page in the same monitored browser and choose a site adapter from the URL, but its output remains Structure Draft only.
+
+The single Capture button in the main Research toolbar means Current Page Research; it does not replace the Structure area's explicit structure capture.
 
 The browser flow should track the current search/target/child tab instead of blindly using stale unrelated tabs. Capture failures must be visible.
 
@@ -380,6 +449,8 @@ Current work should only ensure Catalog captures the facts those later systems w
 - source screenshot becomes Edition/Catalog image data.
 - Edition capture mutates Work.
 - Structure capture mutates unrelated fields.
+- provider-specific Current Page Capture buttons are duplicated instead of using one shared Capture action.
+- Edition capture is exposed in the main Research toolbar before an Edition area exists.
 - Review and Catalog Admin get separate Research engines.
 - Guide becomes a fixed CMS schema prematurely.
 - personalized recommendation output is stored as Catalog truth.
