@@ -20,7 +20,13 @@ When sources conflict:
 
 Old plans, deleted docs, stale handoffs, QA diaries, and Git history are **not** fallback requirements. Do not use them to restore old UI, fields, workflows, or data models unless the user explicitly asks for historical investigation.
 
-If current code conflicts with the Domain Skill, treat the code as implementation that may need to change. If a current requirement is unclear, ask the user rather than filling the gap from history.
+If current code conflicts with the Domain Skill, treat the code as implementation that may need to change.
+
+If two current documents describe the same behavior differently, use the most recent explicit decision. Do not merge, average, or compromise between conflicting versions. The stale document should then be updated or removed so the conflict does not persist.
+
+Old plans, deleted documents, stale handoffs, QA logs, and Git history do not participate in this “latest wins” rule unless the user explicitly asks for historical investigation.
+
+If a current requirement is still unclear, ask the user rather than filling the gap from history.
 
 ## Model before workaround
 
