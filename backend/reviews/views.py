@@ -31,6 +31,7 @@ from .services import (
 
 
 from .structure_extractors import PageSnapshot, extract_structure, extract_url_list
+from .structure_extractors.image import analyze_image
 from .structure_staging import stage_structure_candidates
 from .browser_structure import snapshot_current_page, start_region_selection, poll_region_selection
 from .serializers import StructurePreviewInputSerializer, StructureStageInputSerializer
@@ -574,3 +575,18 @@ class ItemStructureRegionPoll(ReviewAPI):
             return Response({"ready": False})
         snapshot = PageSnapshot(url=region["url"], title=region["title"], html="")
         return Response({"ready": True, "preview": extract_structure(snapshot, html_fragment=region["html"])})
+
+
+class ItemStructureImagePreview(ReviewAPI):
+    def post(self, request, item_id):
+        _primary_subject(item_id)  # enforce the review-item scope
+        uploaded = request.FILES.get("image")
+        if uploaded is None or uploaded.size > 10 * 1024 * 1024:
+            raise ReviewDomainError("请上传 10MB 以内的 PNG / JPG / WebP 图片")
+        if uploaded.content_type not in {"image/png", "image/jpeg", "image/webp"}:
+            raise ReviewDomainError("只支持 PNG / JPG / WebP")
+        try:
+            preview = analyze_image(uploaded.read())
+        except ValueError as error:
+            raise ReviewDomainError(str(error)) from error
+        return Response(preview)
