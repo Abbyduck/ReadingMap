@@ -104,6 +104,26 @@ Rules:
 - repeated Structure capture merges/deduplicates rather than requiring a complete tree in one pass;
 - Catalog structure stores current truth; Research may retain evidence/provenance.
 
+### Structure evidence input modes
+
+Structure recognition accepts four sources:
+1. the current rendered webpage (structured data followed by generic repeated-card/semantic DOM detection);
+2. a human-selected webpage region or pasted HTML subtree;
+3. pasted member URLs;
+4. an image/screenshot or cover collage (including unofficial sets with no reliable website).
+
+All modes normalize to the **same Review-side direct-member candidates**, which are editable and require human confirmation before formal Catalog relationships are committed. Manual DOM selection narrows the extraction search area; it is not a second relationship engine.
+
+Prefer generic structured-data and DOM extraction, then thin per-site hints for genuine exceptions. Do not implement a full bespoke extractor for every publisher.
+
+When automated structure recognition is empty or uncertain, surface diagnostics and manual inputs instead of silently staging zero results or guessing a different page.
+
+A heading such as “1+ 阶拓展阅读 36册” in an image is grouping evidence, not proof of an official publisher Level/Series. Human reviewers choose whether to make a reusable Collection/Set, treat it as a temporary visual group, or ignore it.
+
+`volume_count` may be taken from an explicit source declaration even if fewer members were recognized; never overwrite it with the count staged today. Uncertain titles or cropped images remain Review evidence and do not silently become authoritative Edition/Work media.
+
+**Structure recognition and member enrichment are separate actions.** Structure capture identifies direct relationships only. After review/staging, selected members may optionally be researched one by one using title/URL/cover clues; failures in enrichment must not erase the Structure candidates.
+
 ## 6. Book identity: Entity + Work + Edition
 
 ### Book Entity / Work
