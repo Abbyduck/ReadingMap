@@ -171,11 +171,26 @@ def official_browser_status(expected_query: str = "", alternate_titles=None) -> 
 
 
 def _official_source(subject):
+    """Select a confirmed publisher URL or a human-approved Structure member link.
+
+    Research still requires the reviewer to click 'enrich selected members'.
+    Never silently turn arbitrary retailer/search links into publisher evidence.
+    """
     links = subject.source_links.select_related("research_source").order_by("-research_source__fetched_at", "-pk")
     for link in links:
-        source_type = link.research_source.source_type or ""
+        source = link.research_source
+        source_type = source.source_type or ""
         if "official" in source_type or "publisher" in source_type:
-            return link.research_source
+            return source
+        if source_type == "structure_member_url":
+            parsed = urlsplit(source.source_url or "")
+            host = (parsed.hostname or "").casefold()
+            if parsed.scheme in {"https", "http"} and host and not (
+                host == "localhost" or host.startswith("127.") or
+                "amazon." in host or host.endswith("jd.com") or
+                any(x in host for x in ("google.", "bing.", "baidu."))
+            ):
+                return source
     return None
 
 
