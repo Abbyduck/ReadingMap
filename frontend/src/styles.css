@@ -786,3 +786,41 @@ button.help-trigger:hover, button.help-trigger[aria-expanded="true"] { color: wh
 .edition-draft-row > img { max-width: 55px; max-height: 80px; object-fit: contain; }
 .edition-cover-options { display: flex; gap: .5rem; }
 .edition-cover-options img { width: 70px; height: 95px; object-fit: contain; }
+
+
+/* Assisted Structure capture: resizable-pane-friendly, Review-only candidate preview. */
+.structure-input-panel {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+  margin: 0 0 18px;
+  padding: 14px;
+  background: var(--surface-soft, #f8faf9);
+  border: 1px solid #dbe4df;
+  border-radius: 12px;
+}
+.structure-input-heading { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 8px; }
+.structure-input-heading small, .structure-input-info small, .structure-input-member small { color: #667b74; }
+.structure-input-modes { display: flex; flex-wrap: wrap; gap: 6px; }
+.structure-input-modes button { padding: 7px 11px; border-radius: 8px; background: #fff; border: 1px solid #d9e2de; color: #32534c; }
+.structure-input-modes button.active { background: #dfeee7; border-color: #8cbbab; }
+.structure-input-fields, .structure-input-info { display: grid; gap: 8px; min-width: 0; }
+.structure-input-panel input:not([type="checkbox"]):not([type="file"]),
+.structure-input-panel textarea, .structure-input-panel select {
+  width: 100%; max-width: 100%; min-width: 0; box-sizing: border-box;
+  background: #fff; border: 1px solid #cddbd5; border-radius: 8px; padding: 8px;
+}
+.structure-input-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.structure-input-actions button, .structure-input-info button, .structure-input-panel > button {
+  padding: 8px 12px; border: 1px solid #93b0a5; border-radius: 8px; background: #e8f1ec; color: #225e4f;
+}
+.structure-input-error { color: #aa2939; }
+.structure-input-notice { color: #2c6555; }
+.structure-input-diagnostics { padding: 6px 0; font-size: 12px; color: #4b645b; }
+.structure-input-group { display: grid; grid-template-columns: repeat(auto-fit, minmax(175px, 1fr)); gap: 8px; }
+.structure-input-group label { display: grid; gap: 5px; min-width: 0; font-size: 12px; }
+.structure-input-list { display: grid; gap: 6px; max-height: 420px; overflow-y: auto; }
+.structure-input-member { display: flex; gap: 8px; align-items: center; min-width: 0; border: 1px solid #e0e6e3; background: #fff; border-radius: 8px; padding: 7px; }
+.structure-input-member > img { flex: none; width: 45px; height: 62px; object-fit: contain; }
+.structure-input-member > div { flex: 1; display: grid; gap: 4px; min-width: 0; }
+.structure-input-member small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
