@@ -30,6 +30,12 @@ from .services import (
 )
 
 
+from .structure_extractors import PageSnapshot, extract_structure, extract_url_list
+from .structure_staging import stage_structure_candidates
+from .browser_structure import snapshot_current_page, start_region_selection, poll_region_selection
+from .serializers import StructurePreviewInputSerializer, StructureStageInputSerializer
+
+
 class ReviewAPI(APIView):
     permission_classes = [IsAdminUser]
 
@@ -511,3 +517,60 @@ class ConflictResolve(ReviewAPI):
             conflict = get_object_or_404(ReviewDataConflict.objects.select_for_update(), pk=conflict_id)
             resolve_conflict(conflict, values["status"], self.actor(), values.get("manual_note"))
         return Response({"id": conflict.pk, "status": conflict.status})
+
+
+class ItemStructurePreview(ReviewAPI):
+    """Parse Structure evidence. No database writes until explicit stage."""
+    def post(self, request, item_id):
+        values = self.validated(StructurePreviewInputSerializer)
+        subject = _primary_subject(item_id)
+        kind = values["input_kind"]
+        try:
+            if kind == "browser":
+                snapshot = snapshot_current_page(subject.proposed_display_title or "")
+                result = extract_structure(snapshot)
+            elif kind == "html":
+                snapshot = PageSnapshot(url=values["base_url"], title=subject.proposed_display_title or "",
+                                        html="")
+                result = extract_structure(snapshot, html_fragment=values["html"])
+            else:
+                result = extract_url_list(values["urls"])
+        except ValueError as error:
+            raise ReviewDomainError(str(error)) from error
+        return Response(result)
+
+
+class ItemStructureStage(ReviewAPI):
+    """Review-side candidate staging; does not commit any Catalog relationship."""
+    def post(self, request, item_id):
+        values = self.validated(StructureStageInputSerializer)
+        with review_write_transaction():
+            item = get_object_or_404(ReviewItem.objects.select_for_update(), pk=item_id)
+            subject = _primary_subject(item_id)
+            result = stage_structure_candidates(
+                item=item, parent=subject, actor=self.actor(), **values)
+        item.refresh_from_db()
+        return Response({**result, "item": review_item_to_dict(item)})
+
+
+class ItemStructureRegionStart(ReviewAPI):
+    def post(self, request, item_id):
+        subject = _primary_subject(item_id)
+        try:
+            return Response(start_region_selection(subject.proposed_display_title or ""))
+        except ValueError as error:
+            raise ReviewDomainError(str(error)) from error
+
+
+class ItemStructureRegionPoll(ReviewAPI):
+    def get(self, request, item_id):
+        subject = _primary_subject(item_id)
+        try:
+            response = poll_region_selection(subject.proposed_display_title or "")
+        except ValueError as error:
+            raise ReviewDomainError(str(error)) from error
+        region = response.get("region")
+        if not region:
+            return Response({"ready": False})
+        snapshot = PageSnapshot(url=region["url"], title=region["title"], html="")
+        return Response({"ready": True, "preview": extract_structure(snapshot, html_fragment=region["html"])})
