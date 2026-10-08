@@ -70,8 +70,9 @@ def _connected_driver():
     return webdriver.Chrome(service=Service(chromedriver), options=options)
 
 
-def _target_url(expected_title: str) -> str:
-    """Pick a recognizable current task page; never silently read an unrelated tab."""
+def list_target_pages(expected_title: str) -> list[dict]:
+    if not _browser_is_running():
+        return []
     pages = _devtools_json("/json")
     keywords = [word.casefold() for word in expected_title.split() if len(word) >= 3][:4]
     allowed = []
@@ -89,18 +90,26 @@ def _target_url(expected_title: str) -> str:
         haystack = title + " " + parsed.path.casefold().replace("-", " ")
         if keywords and not any(word in haystack for word in keywords):
             continue
-        allowed.append(row)
+        allowed.append({"url": url, "title": row.get("title") or host})
+    return allowed
+
+
+def _target_url(expected_title: str, selected_url: str | None = None) -> str:
+    allowed = list_target_pages(expected_title)
+    if selected_url:
+        if selected_url not in {row["url"] for row in allowed}:
+            raise ValueError("所选 Chrome 标签页已失效，请刷新页面列表")
+        return selected_url
     if not allowed:
         raise ValueError("没有找到与当前审核对象匹配的页面；请在辅助 Chrome 打开目标系列页面")
     if len(allowed) > 1:
-        # DevTools target order is not a reliable active-tab indicator.
-        raise ValueError("找到多个匹配页面，请先关闭或切走重复标签页，再采集结构")
+        raise ValueError("找到多个相关网页，请先从页面列表中选择要采集的那个标签页")
     return allowed[0]["url"]
 
 
-def _with_target(expected_title: str, callback):
+def _with_target(expected_title: str, callback, selected_url: str | None = None):
     with _browser_lock:
-        url = _target_url(expected_title)
+        url = _target_url(expected_title, selected_url)
         driver = _connected_driver()
         try:
             wanted = urlsplit(url)
@@ -119,24 +128,24 @@ def _with_target(expected_title: str, callback):
                 driver.service.stop()
 
 
-def snapshot_current_page(expected_title: str) -> PageSnapshot:
+def snapshot_current_page(expected_title: str, selected_url: str | None = None) -> PageSnapshot:
     def snapshot(driver):
         html = driver.execute_script("return document.documentElement.outerHTML")
         return PageSnapshot(url=driver.current_url, title=driver.title, html=html)
-    return _with_target(expected_title, snapshot)
+    return _with_target(expected_title, snapshot, selected_url)
 
 
-def start_region_selection(expected_title: str) -> dict:
+def start_region_selection(expected_title: str, selected_url: str | None = None) -> dict:
     def start(driver):
         driver.execute_script(_SELECTION_JS)
         return {"ready": True, "message": "请切换到辅助 Chrome，用鼠标点击书籍网格；按 Esc 取消"}
-    return _with_target(expected_title, start)
+    return _with_target(expected_title, start, selected_url)
 
 
-def poll_region_selection(expected_title: str) -> dict:
+def poll_region_selection(expected_title: str, selected_url: str | None = None) -> dict:
     def poll(driver):
         data = driver.execute_script("return window.__readingMapRegion || null")
         if data:
             driver.execute_script("window.__readingMapRegion = null")
         return {"ready": bool(data), "region": data}
-    return _with_target(expected_title, poll)
+    return _with_target(expected_title, poll, selected_url)
