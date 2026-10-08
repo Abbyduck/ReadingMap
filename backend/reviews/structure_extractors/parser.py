@@ -8,7 +8,7 @@ from urllib.parse import urljoin, urlsplit, urldefrag
 
 from bs4 import BeautifulSoup, Tag
 
-_COUNT = re.compile(r"(?:\\(|（)?\\s*(\\d{1,4})\\s*(?:Titles?|Books?|Volumes?|册|本|种)\\s*(?:\\)|）)?", re.I)
+_COUNT = re.compile(r"(?:\(|（)?\s*(\d{1,4})\s*(?:Titles?|Books?|Volumes?|册|本|种)\s*(?:\)|）)?", re.I)
 _BAD_SECTIONS = ("you might also like", "related books", "other series", "recommended for you",
                  "people also bought", "猜你喜欢", "相关推荐", "其他系列", "更多推荐")
 _BAD_LINKS = ("/cart", "/account", "/search", "/login", "/privacy", "/terms",
