@@ -230,6 +230,7 @@ class ReviewDataConflictSerializer(serializers.ModelSerializer):
 
 class StructurePreviewInputSerializer(serializers.Serializer):
     input_kind = serializers.ChoiceField(choices=["browser", "html", "url_list"])
+    target_url = serializers.URLField(required=False, max_length=1500)
     html = serializers.CharField(required=False, max_length=600000)
     base_url = serializers.URLField(required=False, max_length=1500)
     urls = serializers.ListField(child=serializers.URLField(max_length=1500),
