@@ -5,3 +5,5 @@ jsonschema==4.25.1
 python-dotenv==1.1.1
 selenium==4.49.0
 beautifulsoup4==4.13.4
+Pillow==11.3.0
+pytesseract==0.3.13
