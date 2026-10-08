@@ -33,7 +33,7 @@ from .services import (
 from .structure_extractors import PageSnapshot, extract_structure, extract_url_list
 from .structure_extractors.image import analyze_image
 from .structure_staging import stage_structure_candidates
-from .browser_structure import snapshot_current_page, start_region_selection, poll_region_selection
+from .browser_structure import snapshot_current_page, start_region_selection, poll_region_selection, list_target_pages
 from .serializers import StructurePreviewInputSerializer, StructureStageInputSerializer
 
 
@@ -528,7 +528,7 @@ class ItemStructurePreview(ReviewAPI):
         kind = values["input_kind"]
         try:
             if kind == "browser":
-                snapshot = snapshot_current_page(subject.proposed_display_title or "")
+                snapshot = snapshot_current_page(subject.proposed_display_title or "", values.get("target_url"))
                 result = extract_structure(snapshot)
             elif kind == "html":
                 snapshot = PageSnapshot(url=values["base_url"], title=subject.proposed_display_title or "",
@@ -558,7 +558,7 @@ class ItemStructureRegionStart(ReviewAPI):
     def post(self, request, item_id):
         subject = _primary_subject(item_id)
         try:
-            return Response(start_region_selection(subject.proposed_display_title or ""))
+            return Response(start_region_selection(subject.proposed_display_title or "", request.data.get("target_url")))
         except ValueError as error:
             raise ReviewDomainError(str(error)) from error
 
@@ -567,7 +567,7 @@ class ItemStructureRegionPoll(ReviewAPI):
     def get(self, request, item_id):
         subject = _primary_subject(item_id)
         try:
-            response = poll_region_selection(subject.proposed_display_title or "")
+            response = poll_region_selection(subject.proposed_display_title or "", request.query_params.get("target_url"))
         except ValueError as error:
             raise ReviewDomainError(str(error)) from error
         region = response.get("region")
@@ -590,3 +590,13 @@ class ItemStructureImagePreview(ReviewAPI):
         except ValueError as error:
             raise ReviewDomainError(str(error)) from error
         return Response(preview)
+
+
+class ItemStructureTabs(ReviewAPI):
+    def get(self, request, item_id):
+        subject = _primary_subject(item_id)
+        try:
+            tabs = list_target_pages(subject.proposed_display_title or "")
+        except ValueError as error:
+            raise ReviewDomainError(str(error)) from error
+        return Response({"tabs": tabs})
