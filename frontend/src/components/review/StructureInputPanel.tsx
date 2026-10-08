@@ -5,11 +5,12 @@ type Mode = "browser" | "html" | "url_list" | "image";
 type Row = StructureMemberCandidate & { selected: boolean };
 
 export function StructureInputPanel({
-  itemId, disabled, onStaged
+  itemId, disabled, onStaged, beforeStage
 }: {
   itemId: number;
   disabled: boolean;
   onStaged: (item: ReviewItem, count: number) => void;
+  beforeStage?: () => Promise<void>;
 }) {
   const [mode, setMode] = useState<Mode>("browser");
   const [html, setHtml] = useState("");
@@ -100,6 +101,7 @@ export function StructureInputPanel({
     if (!selected.length) { setError("请勾选并填写至少一个成员书名"); return; }
     setBusy(true); setError("");
     try {
+      if (beforeStage) await beforeStage();
       const result = await api.stageStructure(itemId, {
         members: selected.map(({ selected: _, ...row }) => ({
           ...row,
