@@ -40,6 +40,8 @@ def analyze_image(raw: bytes) -> dict:
         raise ValueError("图片不能超过 10MB")
     try:
         image = Image.open(io.BytesIO(raw))
+        if image.width * image.height > 30_000_000:
+            raise ValueError("图片像素过大")
         image.verify()
         image = Image.open(io.BytesIO(raw))
         image = ImageOps.exif_transpose(image).convert("RGB")
