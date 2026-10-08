@@ -322,6 +322,29 @@ export type BrowserSessionStatus = {
   message: string;
 };
 
+export type StructureMemberCandidate = {
+  title: string;
+  url?: string | null;
+  image?: string | null;
+  position?: number | null;
+  confidence?: number;
+  source_kind?: string;
+  candidate_index?: number;
+};
+export type StructurePreview = {
+  members: StructureMemberCandidate[];
+  group?: { title?: string | null; declared_count?: number | null } | null;
+  declared_count?: number | null;
+  diagnostics: {
+    strategy: string;
+    candidate_group_count: number;
+    candidate_link_count: number;
+    accepted_member_count: number;
+    confidence: number;
+    messages: string[];
+  };
+};
+
 export const api = {
   me: () => request<{ user: User | null }>("/auth/me"),
   register: (payload: { email: string; password: string; name?: string }) => request<{ user: User }>("/auth/register", json("POST", payload)),
@@ -418,6 +441,25 @@ export const api = {
     request<ReviewItem>(`/review/items/${itemId}/subjects/${subjectId}/guide-material`, json("POST", { raw_content: rawContent, source_title: sourceTitle })),
   saveGuideDraft: (itemId: number, subjectId: number, markdown: string) =>
     request<ReviewItem>(`/review/items/${itemId}/subjects/${subjectId}/guide-draft`, json("PUT", { guide_markdown_draft: markdown })),
+  previewStructure: (itemId: number, input: { input_kind: "browser" | "html" | "url_list"; html?: string; base_url?: string; urls?: string[] }) =>
+    request<StructurePreview>(`/review/items/${itemId}/structure/preview`, json("POST", input)),
+  previewStructureImage: (itemId: number, file: File) => {
+    const body = new FormData();
+    body.append("image", file);
+    return request<StructurePreview>(`/review/items/${itemId}/structure/image-preview`, { method: "POST", body });
+  },
+  stageStructure: (itemId: number, payload: {
+    members: StructureMemberCandidate[];
+    declared_count?: number | null;
+    group_choice: "none" | "create";
+    group_title?: string;
+    group_type?: "set" | "series" | "level" | "reading_system" | "franchise";
+  }) => request<{ relation_ids: number[]; container_subject_id: number; item: ReviewItem }>(
+    `/review/items/${itemId}/structure/stage`, json("POST", payload)),
+  startStructureRegion: (itemId: number) =>
+    request<{ ready: boolean; message: string }>(`/review/items/${itemId}/structure/region/start`, json("POST", {})),
+  pollStructureRegion: (itemId: number) =>
+    request<{ ready: boolean; preview?: StructurePreview }>(`/review/items/${itemId}/structure/region/poll`),
   researchSelectedStructure: (itemId: number, memberSubjectIds: number[]) =>
     request<{ item: ReviewItem; captured_subject_ids: number[]; capture_errors: Record<string, string> }>(`/review/items/${itemId}/structure-research`, json("POST", { member_subject_ids: memberSubjectIds })),
   createParentStructure: (itemId: number, payload: {
