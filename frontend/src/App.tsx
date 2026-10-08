@@ -1806,8 +1806,6 @@ function ReviewView({ lists, onResolved }: { lists: ReadingList[]; onResolved: (
                 <button type="button" className="tool-action capture" disabled={busy || !!selected.decision || !!productOperation || !!officialOperation || unifiedCapturePending} onClick={() => void captureCurrentPage()}>{unifiedCapturePending || productOperation === "capture" || officialOperation === "capture" ? <RefreshCw className="spin" size={14} /> : <FileInput size={14} />}{unifiedCapturePending || productOperation === "capture" || officialOperation === "capture" ? "采集中…" : "采集当前页"}</button>
               </div>
               <div className="review-promoted-tools">
-                <button type="button" className="tool-action" disabled={busy || !!selected.decision || !browserStatus?.capture_ready} onClick={() => void captureScoped("structure", activeRetailer)} title="从当前商品页采集结构">采集商品结构</button>
-                <button type="button" className="tool-action" disabled={busy || !!selected.decision || !officialStatus?.capture_ready} onClick={() => void captureScoped("structure", "official")} title="从当前官网页采集结构">采集官网结构</button>
               </div>
               <button className="review-tool-overflow-trigger" type="button" aria-label="更多采集与 Research 操作" aria-expanded={toolbarOverflowOpen} onClick={() => setToolbarOverflowOpen((open) => !open)}><Ellipsis size={18} /></button>
               <div className={`review-secondary-tools${toolbarOverflowOpen ? " open" : ""}`}>
