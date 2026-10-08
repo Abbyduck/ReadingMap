@@ -6,6 +6,7 @@ from .models import (
 )
 from .services import review_write_transaction
 from .structure_staging import stage_structure_candidates
+from .official_assist import _official_source
 
 
 class StructureStagingTests(TestCase):
@@ -57,3 +58,15 @@ class StructureStagingTests(TestCase):
         self.stage([{"title": "Book B"}], declared_count=36)
         self.assertEqual(self.parent.facts_json["volume_count"]["value"], 36)
         self.assertEqual(self.parent.member_relations.count(), 2)
+
+    def test_confirmed_member_url_is_available_for_optional_enrichment(self):
+        result = self.stage([{"title": "Book A", "url": "https://publisher.example/books/a"}])
+        relation = ResearchSubjectRelation.objects.get(pk=result["relation_ids"][0])
+        source = _official_source(relation.member_subject)
+        self.assertIsNotNone(source)
+        self.assertEqual(source.source_url, "https://publisher.example/books/a")
+
+    def test_retailer_member_url_is_not_mislabeled_as_official(self):
+        result = self.stage([{"title": "Book A", "url": "https://www.amazon.com/dp/B000000"}])
+        relation = ResearchSubjectRelation.objects.get(pk=result["relation_ids"][0])
+        self.assertIsNone(_official_source(relation.member_subject))
