@@ -226,3 +226,41 @@ class ReviewDataConflictSerializer(serializers.ModelSerializer):
     class Meta:
         model = ReviewDataConflict
         fields = ["id", "review_item_id", "research_subject_id", "catalog_entity_id", "field_path", "existing_value", "proposed_value", "status", "manual_note"]
+
+
+class StructurePreviewInputSerializer(serializers.Serializer):
+    input_kind = serializers.ChoiceField(choices=["browser", "html", "url_list"])
+    html = serializers.CharField(required=False, max_length=600000)
+    base_url = serializers.URLField(required=False, max_length=1500)
+    urls = serializers.ListField(child=serializers.URLField(max_length=1500),
+                                 required=False, min_length=1, max_length=500)
+
+    def validate(self, values):
+        kind = values["input_kind"]
+        if kind == "html" and (not values.get("html") or not values.get("base_url")):
+            raise serializers.ValidationError("HTML 需要内容和原网页 URL，以正确解析相对链接")
+        if kind == "url_list" and not values.get("urls"):
+            raise serializers.ValidationError("请粘贴至少一个成员 URL")
+        return values
+
+
+class StructureCandidateInputSerializer(serializers.Serializer):
+    title = serializers.CharField(max_length=500)
+    url = serializers.URLField(max_length=1500, required=False, allow_null=True, allow_blank=True)
+    image = serializers.CharField(max_length=2000, required=False, allow_null=True, allow_blank=True)
+    position = serializers.IntegerField(min_value=1, required=False, allow_null=True)
+    confidence = serializers.FloatField(min_value=0, max_value=1, required=False, default=0.5)
+    source_kind = serializers.CharField(max_length=40, required=False)
+
+
+class StructureStageInputSerializer(serializers.Serializer):
+    members = StructureCandidateInputSerializer(many=True, min_length=1, max_length=500)
+    declared_count = serializers.IntegerField(min_value=1, max_value=10000, required=False, allow_null=True)
+    group_choice = serializers.ChoiceField(choices=["none", "create"], default="none")
+    group_title = serializers.CharField(max_length=500, allow_blank=True, required=False, default="")
+    group_type = serializers.ChoiceField(choices=sorted(COLLECTION_ENTITY_TYPES), default="set")
+
+    def validate(self, values):
+        if values["group_choice"] == "create" and not values.get("group_title", "").strip():
+            raise serializers.ValidationError("创建分组时必须填写分组名称")
+        return values
