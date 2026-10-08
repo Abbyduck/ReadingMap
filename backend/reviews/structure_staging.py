@@ -9,7 +9,7 @@ from .models import (
     ResearchSource, ResearchSubject, ResearchSubjectRelation,
     ResearchSubjectSource, ReviewItemSubject,
 )
-from .services import ReviewDomainError, _touch_research_items
+from .services import ReviewDomainError, _touch_research_items, refresh_catalog_candidates
 
 _COLLECTION_TYPES = {"reading_system", "level", "series", "set", "franchise"}
 
@@ -58,17 +58,22 @@ def stage_structure_candidates(*, item, parent, members, declared_count=None,
         fetched_at=timezone.now())
     ResearchSubjectSource.objects.get_or_create(research_subject=container, research_source=source)
 
-    existing = {
-        (relation.member_subject.proposed_display_title or "").casefold(): relation
-        for relation in container.member_relations.select_related("member_subject")
-    }
+    existing = list(container.member_relations.select_related("member_subject"))
     relation_ids = []
     for row in members:
         title = " ".join(row.get("title", "").split()).strip()
         if not title:
             continue
-        key = title.casefold()
-        relation = existing.get(key)
+        candidate_url = row.get("url") or ""
+        relation = None
+        for known in existing:
+            if (known.member_subject.proposed_display_title or "").casefold() != title.casefold():
+                continue
+            known_urls = set(known.member_subject.source_links.values_list("research_source__source_url", flat=True))
+            known_urls = {url for url in known_urls if url.startswith(("https://", "http://"))}
+            if not candidate_url or not known_urls or candidate_url in known_urls:
+                relation = known
+                break
         if relation is None:
             member = ResearchSubject.objects.create(
                 proposed_entity_type="book", proposed_display_title=title,
@@ -91,7 +96,8 @@ def stage_structure_candidates(*, item, parent, members, declared_count=None,
                 confidence=Decimal(str(max(0.0, min(1.0, float(row.get("confidence", 0.5)))))),
                 review_status="proposed",
             )
-            existing[key] = relation
+            existing.append(relation)
+            refresh_catalog_candidates(member)
         ResearchSubjectSource.objects.get_or_create(research_subject=relation.member_subject,
                                                      research_source=source)
         if row.get("url") and urlsplit(row["url"]).scheme in {"http", "https"}:
