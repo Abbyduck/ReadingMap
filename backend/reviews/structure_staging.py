@@ -26,8 +26,8 @@ def stage_structure_candidates(*, item, parent, members, declared_count=None,
         raise ReviewDomainError("Invalid group choice")
     if group_choice == "create" and (group_type not in _COLLECTION_TYPES or not group_title.strip()):
         raise ReviewDomainError("创建分组必须选择有效类型与名称")
-    if group_choice == "none" and parent.proposed_entity_type not in _COLLECTION_TYPES:
-        raise ReviewDomainError("请先将当前对象设为 Collection 类型，或选择创建一个分组")
+    if parent.proposed_entity_type not in _COLLECTION_TYPES:
+        raise ReviewDomainError("Book/Animation 不能包含成员；请先选择一个 Collection 审核对象再录入结构")
 
     container = parent
     if group_choice == "create":
