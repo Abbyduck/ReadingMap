@@ -441,7 +441,9 @@ export const api = {
     request<ReviewItem>(`/review/items/${itemId}/subjects/${subjectId}/guide-material`, json("POST", { raw_content: rawContent, source_title: sourceTitle })),
   saveGuideDraft: (itemId: number, subjectId: number, markdown: string) =>
     request<ReviewItem>(`/review/items/${itemId}/subjects/${subjectId}/guide-draft`, json("PUT", { guide_markdown_draft: markdown })),
-  previewStructure: (itemId: number, input: { input_kind: "browser" | "html" | "url_list"; html?: string; base_url?: string; urls?: string[] }) =>
+  structureTabs: (itemId: number) =>
+    request<{ tabs: Array<{ url: string; title: string }> }>(`/review/items/${itemId}/structure/tabs`),
+  previewStructure: (itemId: number, input: { input_kind: "browser" | "html" | "url_list"; html?: string; base_url?: string; urls?: string[]; target_url?: string }) =>
     request<StructurePreview>(`/review/items/${itemId}/structure/preview`, json("POST", input)),
   previewStructureImage: (itemId: number, file: File) => {
     const body = new FormData();
@@ -456,10 +458,10 @@ export const api = {
     group_type?: "set" | "series" | "level" | "reading_system" | "franchise";
   }) => request<{ relation_ids: number[]; container_subject_id: number; item: ReviewItem }>(
     `/review/items/${itemId}/structure/stage`, json("POST", payload)),
-  startStructureRegion: (itemId: number) =>
-    request<{ ready: boolean; message: string }>(`/review/items/${itemId}/structure/region/start`, json("POST", {})),
-  pollStructureRegion: (itemId: number) =>
-    request<{ ready: boolean; preview?: StructurePreview }>(`/review/items/${itemId}/structure/region/poll`),
+  startStructureRegion: (itemId: number, targetUrl?: string) =>
+    request<{ ready: boolean; message: string }>(`/review/items/${itemId}/structure/region/start`, json("POST", { target_url: targetUrl })),
+  pollStructureRegion: (itemId: number, targetUrl?: string) =>
+    request<{ ready: boolean; preview?: StructurePreview }>(`/review/items/${itemId}/structure/region/poll${targetUrl ? `?target_url=${encodeURIComponent(targetUrl)}` : ""}`),
   researchSelectedStructure: (itemId: number, memberSubjectIds: number[]) =>
     request<{ item: ReviewItem; captured_subject_ids: number[]; capture_errors: Record<string, string> }>(`/review/items/${itemId}/structure-research`, json("POST", { member_subject_ids: memberSubjectIds })),
   createParentStructure: (itemId: number, payload: {
