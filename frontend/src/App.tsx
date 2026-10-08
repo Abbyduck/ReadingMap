@@ -2,6 +2,7 @@ import { CSSProperties, FormEvent, KeyboardEvent as ReactKeyboardEvent, PointerE
 import { ArrowLeft, Baby, BookOpen, Boxes, Check, CheckCircle2, ChevronDown, ChevronLeft, ChevronRight, CircleAlert, CircleHelp, Database, Ellipsis, ExternalLink, Eye, EyeOff, FileInput, Film, ImageIcon, LibraryBig, RefreshCw, Search, ShieldCheck, Sparkles, UserRound, X } from "lucide-react";
 import { api, BrowserSessionStatus, CatalogCategory, CatalogEntity, CatalogTreeNode, Child, Creator, DatabaseTable, DatabaseTableDetail, EntityType, ReadingList, ResearchSubject, ReviewBatch, ReviewItem, ReviewSourceDocument, catalogAssetUrl } from "./api/client";
 import { SourceDocumentReader } from "./components/review/SourceDocumentReader";
+import { StructureInputPanel } from "./components/review/StructureInputPanel";
 import { CatalogAdminEditor } from "./components/catalog/CatalogAdminEditor";
 
 type Tab = "catalog" | "lists" | "review" | "children" | "database";
@@ -1957,6 +1958,16 @@ function ReviewView({ lists, onResolved }: { lists: ReadingList[]; onResolved: (
             {productCaptured ? <details className="capture-results"><summary>查看字段证据与来源</summary><ProductCaptureResults subject={primary} disabled={busy || !!selected.decision} showImages={false} /></details> : null}
           </ReviewSection>
           <ReviewSection eyebrow="COLLECTION · REVIEW STAGED" title="成员结构" tone="structure" action={memberStructureSubjects.length ? <button className="icon-button" disabled={!!selected.decision} onClick={toggleAllStructure}>{memberStructureSubjects.every((subject) => selectedStructure.includes(subject.id)) ? "取消全选成员" : `全选 ${memberStructureSubjects.length} 个`}</button> : null}>
+            <StructureInputPanel
+              itemId={selected.id}
+              disabled={busy || !!selected.decision}
+              beforeStage={async () => { if (draftDirty) await persistCatalogDraft(); }}
+              onStaged={(updated, count) => {
+                setItems((current) => current.map((item) => item.id === updated.id ? updated : item));
+                setStructureAction(`已暂存 ${count} 个直接成员候选，请审核确认。`);
+              }}
+            />
+
             {memberStructureSubjects.length ? <div className="member-structure-block">
               <div className="structure-summary"><div><strong>{primary.proposed_display_title}</strong><span>{entityLabels[proposalType || "set"]} · 已发现 {memberStructureSubjects.length} 个直接成员</span></div><p>只对勾选成员建立直接关系；达人推荐仍只指向当前主项。</p></div>
               <div className="member-tools"><button disabled={!selectedMemberSubjects.length || !!selected.decision || busy} onClick={() => void researchSelectedStructure()}>获取并汇总所选官网资料</button><button disabled={!selectedMemberSubjects.length || !!selected.decision} onClick={() => setStructureAction("本轮暂不补成员资料，仅保留已确认的结构草稿。")}>暂不补资料</button></div>
