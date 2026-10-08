@@ -13,6 +13,8 @@ export function StructureInputPanel({
   beforeStage?: () => Promise<void>;
 }) {
   const [mode, setMode] = useState<Mode>("browser");
+  const [tabs, setTabs] = useState<Array<{ title: string; url: string }>>([]);
+  const [targetUrl, setTargetUrl] = useState("");
   const [html, setHtml] = useState("");
   const [baseUrl, setBaseUrl] = useState("");
   const [urls, setUrls] = useState("");
@@ -33,12 +35,22 @@ export function StructureInputPanel({
     setGroupChoice("none"); setPicking(false); setError(""); setNotice("");
   }, [itemId]);
 
+  async function refreshTabs() {
+    try {
+      const result = await api.structureTabs(itemId);
+      setTabs(result.tabs);
+      setTargetUrl(previous => result.tabs.some(tab => tab.url === previous) ? previous :
+        result.tabs.length === 1 ? result.tabs[0].url : "");
+    } catch (reason) { setError(String(reason)); }
+  }
+  useEffect(() => { void refreshTabs(); }, [itemId]);
+
   useEffect(() => {
     if (!picking) return;
     let live = true;
     const timer = window.setInterval(async () => {
       try {
-        const result = await api.pollStructureRegion(itemId);
+        const result = await api.pollStructureRegion(itemId, targetUrl || undefined);
         if (live && result.ready && result.preview) {
           usePreview(result.preview);
           setPicking(false);
@@ -49,7 +61,7 @@ export function StructureInputPanel({
       }
     }, 1600);
     return () => { live = false; window.clearInterval(timer); };
-  }, [picking, itemId]);
+  }, [picking, itemId, targetUrl]);
 
   function usePreview(result: StructurePreview) {
     setRows(result.members.map((item) => ({
@@ -79,7 +91,7 @@ export function StructureInputPanel({
           input_kind: "url_list", urls: urls.split(/\r?\n/).map(v => v.trim()).filter(Boolean)
         });
       } else {
-        result = await api.previewStructure(itemId, { input_kind: "browser" });
+        result = await api.previewStructure(itemId, { input_kind: "browser", target_url: targetUrl || undefined });
       }
       usePreview(result);
     } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }
@@ -89,7 +101,7 @@ export function StructureInputPanel({
   async function startPicker() {
     setBusy(true); setError("");
     try {
-      const reply = await api.startStructureRegion(itemId);
+      const reply = await api.startStructureRegion(itemId, targetUrl || undefined);
       setPicking(true);
       setNotice(reply.message);
     } catch (reason) { setError(String(reason)); }
@@ -151,6 +163,14 @@ export function StructureInputPanel({
     </div>
     {mode === "browser" ? <div className="structure-input-info">
       从辅助 Chrome 当前相关页面识别图书列表；如果识别不准，可以在网页中点选书籍网格。
+      <div className="structure-input-tab-row">
+        <button type="button" onClick={() => void refreshTabs()} disabled={busy}>刷新 Chrome 页面</button>
+        {tabs.length ? <select aria-label="选择成员结构的网页" value={targetUrl}
+          onChange={e => setTargetUrl(e.target.value)}>
+          {tabs.length > 1 ? <option value="">请选择目标网页</option> : null}
+          {tabs.map(tab => <option key={tab.url} value={tab.url}>{tab.title} · {tab.url}</option>)}
+        </select> : <small>暂未发现匹配网页，可先在 Chrome 打开目标网页再刷新。</small>}
+      </div>
       <button type="button" disabled={disabled || busy || picking} onClick={() => void startPicker()}>
         {picking ? "等待网页点击…" : "在 Chrome 选择成员区域"}
       </button>
