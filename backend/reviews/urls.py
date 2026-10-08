@@ -18,6 +18,7 @@ urlpatterns = [
     path("items/<int:item_id>/capture-<str:scope>", views.ItemScopedCapture.as_view()),
     path("items/<int:item_id>/edition-drafts/<int:draft_id>", views.ItemEditionDraft.as_view()),
     path("items/<int:item_id>/structure/preview", views.ItemStructurePreview.as_view()),
+    path("items/<int:item_id>/structure/image-preview", views.ItemStructureImagePreview.as_view()),
     path("items/<int:item_id>/structure/stage", views.ItemStructureStage.as_view()),
     path("items/<int:item_id>/structure/region/start", views.ItemStructureRegionStart.as_view()),
     path("items/<int:item_id>/structure/region/poll", views.ItemStructureRegionPoll.as_view()),
